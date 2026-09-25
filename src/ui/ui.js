@@ -9,6 +9,8 @@ import { BIOME_NAMES } from '../world/gen/overworld.js';
 import { EFFECT_NAMES } from '../entity/living.js';
 import { POTIONS } from '../world/updates.js';
 import { END_POEM, CREDITS } from './poem.js';
+import { KEY_ACTIONS, DEFAULT_KEYS, keyName, conflicts } from '../game/keybinds.js';
+import { SHADER_PRESETS } from '../gfx/fancy.js';
 
 const SPLASHES = ['Édition JavaScript !', '100 % procédural !', 'Aussi en français !', 'Terminez le jeu !', 'Méfiez-vous des Creepers !', 'Ne regardez pas les Endermen !', 'Des cubes partout !', 'Fait avec WebGL2 !', 'Sans aucune image !', 'Le dragon vous attend...'];
 
@@ -104,8 +106,8 @@ export class UI {
       return b;
     };
     const inp = this.game.input;
-    mk('⤒', 'tjump', () => inp.keys.add('Space'), () => inp.keys.delete('Space'));
-    mk('⇩', 'tsneak', () => { if (inp.keys.has('ShiftLeft')) inp.keys.delete('ShiftLeft'); else inp.keys.add('ShiftLeft'); });
+    mk('⤒', 'tjump', () => inp.keys.add(inp.binds.jump), () => inp.keys.delete(inp.binds.jump));
+    mk('⇩', 'tsneak', () => { const k = inp.binds.sneak; if (inp.keys.has(k)) inp.keys.delete(k); else inp.keys.add(k); });
     mk('⛏', 'tbreak', () => { inp.mouse.left = true; }, () => { inp.mouse.left = false; });
     mk('✋', 'tuse', () => { inp.mouse.right = true; inp.clicked.right = true; }, () => { inp.mouse.right = false; });
     mk('🎒', 'tinv', () => this.openInventory());
@@ -189,31 +191,35 @@ export class UI {
   handleKey(e, down) {
     const g = this.game;
     const code = e.code;
+    const k = g.settings.keys;
     if (this.chatOpen) return true;
+    if (this.capture) {
+      if (down) { e.preventDefault(); this.capture(code); }
+      return true;
+    }
     if (!down) return false;
     if (this.menu) {
       if (code === 'Escape' && this.menu.back) { this.menu.back(); return true; }
       return false;
     }
     if (this.screen) {
-      if (code === 'Escape' || code === 'KeyE') { this.closeScreen(); e.preventDefault(); return true; }
-      if (code.startsWith('Digit')) { const n = parseInt(code.slice(5), 10) - 1; if (n >= 0 && n < 9 && this.screen.numberKey) this.screen.numberKey(n); return true; }
-      if (code === 'KeyQ' && this.screen.dropHovered) { this.screen.dropHovered(e.ctrlKey); return true; }
+      if (code === 'Escape' || code === k.inventory) { this.closeScreen(); e.preventDefault(); return true; }
+      for (let i = 1; i <= 9; i++) if (code === k['hotbar' + i]) { if (this.screen.numberKey) this.screen.numberKey(i - 1); return true; }
+      if (code === k.drop && this.screen.dropHovered) { this.screen.dropHovered(e.ctrlKey); return true; }
       return true;
     }
     if (g.state !== 'playing') return false;
-    switch (code) {
-      case 'Escape': this.openPause(); return true;
-      case 'KeyE': this.openInventory(); return true;
-      case 'KeyT': case 'Enter': this.openChat(''); e.preventDefault(); return true;
-      case 'Slash': case 'NumpadDivide': this.openChat('/'); e.preventDefault(); return true;
-      case 'KeyL': this.openAdvancements(); return true;
-      case 'F1': g.hideHud = !g.hideHud; e.preventDefault(); return true;
-      case 'F3': g.showDebug = !g.showDebug; e.preventDefault(); return true;
-      case 'F5': g.cameraMode = (g.cameraMode + 1) % 3; e.preventDefault(); return true;
-      case 'F2': this.screenshot(); e.preventDefault(); return true;
-      default: return false;
-    }
+    const act = (fn) => { e.preventDefault(); fn(); return true; };
+    if (code === 'Escape') { this.openPause(); return true; }
+    if (code === k.inventory) return act(() => this.openInventory());
+    if (code === k.chat || code === 'Enter') return act(() => this.openChat(''));
+    if (code === k.command || code === 'NumpadDivide') return act(() => this.openChat('/'));
+    if (code === k.advancements) return act(() => this.openAdvancements());
+    if (code === k.hideHud) return act(() => { g.hideHud = !g.hideHud; });
+    if (code === k.debug) return act(() => { g.showDebug = !g.showDebug; });
+    if (code === k.perspective) return act(() => { g.cameraMode = (g.cameraMode + 1) % 3; });
+    if (code === k.screenshot) return act(() => this.screenshot());
+    return false;
   }
 
   // ---------- chat ----------
@@ -596,54 +602,139 @@ export class UI {
   }
 
   // ----- options -----
-  openOptions(back) {
+  openOptions(back, tab = 'video') {
     const g = this.game, s = g.settings;
+    const TABS = [['video', 'Vidéo'], ['shaders', 'Shaders'], ['sound', 'Son'], ['controls', 'Commandes'], ['game', 'Jeu']];
     this.showMenu((p) => {
       el('h2', '', p, 'Options');
+      const tabs = el('div', 'tabs', p);
+      for (const [id, label] of TABS) {
+        const b = el('button', 'btn tab' + (id === tab ? ' sel' : ''), tabs, label);
+        b.addEventListener('click', (e) => { e.stopPropagation(); g.audio.ui('click'); g.saveSettings(); this.openOptions(back, id); });
+      }
       const f = el('div', 'options', p);
+      const pct = (v) => Math.round(v * 100) + ' %';
       const slider = (label, key, min, max, step, fmt) => {
         const r = el('label', 'opt', f);
         const t = el('span', '', r);
         const i = el('input', '', r);
         i.type = 'range'; i.min = min; i.max = max; i.step = step; i.value = s[key];
+        i.id = 'opt-' + key;
         const upd = () => { t.textContent = label + ' : ' + (fmt ? fmt(s[key]) : s[key]); };
         i.addEventListener('input', () => { s[key] = parseFloat(i.value); upd(); g.applySettings(); });
         upd();
       };
-      const toggle = (label, key) => {
+      const toggle = (label, key, remesh = false, fmt) => {
         const b = el('button', 'btn opt', f);
-        const upd = () => { b.textContent = label + ' : ' + (s[key] ? 'OUI' : 'NON'); };
-        b.addEventListener('click', () => { s[key] = !s[key]; upd(); g.applySettings(); g.audio.ui('click'); });
+        const upd = () => { b.textContent = label + ' : ' + (fmt ? fmt(s[key]) : s[key] ? 'OUI' : 'NON'); };
+        b.addEventListener('click', () => { s[key] = !s[key]; upd(); g.applySettings(remesh); g.audio.ui('click'); });
         upd();
       };
-      const choice = (label, key, opts) => {
-        const b = el('button', 'btn opt', f);
+      const choice = (label, key, opts, after, wide = false) => {
+        const b = el('button', 'btn opt' + (wide ? ' wide' : ''), f);
         const upd = () => { b.textContent = label + ' : ' + opts[s[key]]; };
-        b.addEventListener('click', () => { s[key] = (s[key] + 1) % opts.length; upd(); g.applySettings(); g.audio.ui('click'); });
+        b.addEventListener('click', () => { s[key] = (s[key] + 1) % opts.length; upd(); g.applySettings(); g.audio.ui('click'); if (after) after(s[key]); });
         upd();
       };
-      slider('Distance d\'affichage', 'renderDistance', 2, 16, 1, (v) => v + ' chunks');
-      slider('Champ de vision', 'fov', 50, 110, 1, (v) => v + '°');
-      slider('Sensibilité', 'sensitivity', 0.2, 3, 0.05, (v) => Math.round(v * 100) + ' %');
-      slider('Luminosité', 'brightness', 0, 1, 0.05, (v) => (v === 0 ? 'Sombre' : v === 1 ? 'Lumineux' : Math.round(v * 100) + ' %'));
-      slider('Volume général', 'volume', 0, 1, 0.05, (v) => Math.round(v * 100) + ' %');
-      slider('Musique', 'musicVolume', 0, 1, 0.05, (v) => Math.round(v * 100) + ' %');
-      slider('Effets sonores', 'sfxVolume', 0, 1, 0.05, (v) => Math.round(v * 100) + ' %');
-      slider('Échelle de l\'interface', 'guiScale', 1, 4, 1, (v) => '×' + v);
-      slider('Résolution', 'resolution', 0.4, 1, 0.1, (v) => Math.round(v * 100) + ' %');
-      choice('Difficulté', 'difficulty', ['Paisible', 'Facile', 'Normale', 'Difficile']);
-      choice('Particules', 'particles', ['Minimales', 'Réduites', 'Toutes']);
-      toggle('Feuilles détaillées', 'fancyLeaves');
-      toggle('Éclairage lissé', 'smoothLighting');
-      toggle('Nuages', 'clouds');
-      toggle('Balancement de la vue', 'viewBobbing');
-      toggle('Inverser la souris', 'invertY');
-      toggle('Garder l\'inventaire à la mort', 'keepInventory');
-      toggle('Cycle jour/nuit', 'doDaylightCycle');
-      toggle('Apparition des monstres', 'doMobSpawning');
+      const header = (text) => el('div', 'optcat', f, text);
+      const note = (text) => el('div', 'optnote', f, text);
+
+      if (tab === 'video') {
+        slider('Distance d\'affichage', 'renderDistance', 2, 32, 1, (v) => v + ' chunks' + (v > 16 ? ' (très gourmand)' : v > 12 ? ' (gourmand)' : ''));
+        slider('Champ de vision', 'fov', 50, 110, 1, (v) => (v === 70 ? 'Normal' : v >= 110 ? 'Quake Pro' : v + '°'));
+        slider('Luminosité', 'brightness', 0, 1, 0.05, (v) => (v === 0 ? 'Sombre' : v === 1 ? 'Lumineux' : pct(v)));
+        slider('Échelle de l\'interface', 'guiScale', 1, 4, 1, (v) => '×' + v);
+        slider('Résolution de rendu', 'resolution', 0.4, 1, 0.1, pct);
+        choice('Particules', 'particles', ['Minimales', 'Réduites', 'Toutes']);
+        toggle('Feuilles détaillées', 'fancyLeaves', true);
+        toggle('Éclairage lissé', 'smoothLighting', true);
+        toggle('Nuages', 'clouds');
+        toggle('Balancement de la vue', 'viewBobbing');
+      } else if (tab === 'shaders') {
+        choice('Mode shader', 'shaders', ['Désactivé', 'Bas', 'Moyen', 'Élevé', 'Ultra'], (v) => {
+          if (SHADER_PRESETS[v]) Object.assign(s, SHADER_PRESETS[v]);
+          g.saveSettings();
+          this.openOptions(back, 'shaders');
+        }, true);
+        if (g.renderer.fancyError) note('Le mode shader n\'a pas pu démarrer sur cet appareil : ' + g.renderer.fancyError);
+        else if (!s.shaders) note('Active les ombres dynamiques du soleil et de la lune, l\'eau qui reflète le paysage, la végétation qui ondule au vent, les nuages volumétriques, le halo des lumières et les rayons de soleil. Demande une carte graphique correcte.');
+        if (s.shaders) {
+          toggle('Ombres dynamiques', 'shaderShadows');
+          choice('Qualité des ombres', 'shaderShadowQuality', ['Basse (1024)', 'Haute (2048)', 'Ultra (4096)']);
+          slider('Portée des ombres', 'shaderShadowDist', 32, 160, 16, (v) => v + ' blocs');
+          toggle('Réflexions de l\'eau', 'shaderWater');
+          toggle('Végétation ondulante', 'shaderWaving');
+          toggle('Halo lumineux (bloom)', 'shaderBloom');
+          toggle('Rayons de soleil', 'shaderGodrays');
+          toggle('Vignette', 'shaderVignette');
+          slider('Exposition', 'shaderExposure', 0.5, 2, 0.05, pct);
+          slider('Saturation', 'shaderSaturation', 0.5, 1.6, 0.05, pct);
+        }
+      } else if (tab === 'sound') {
+        slider('Volume général', 'volume', 0, 1, 0.05, pct);
+        slider('Musique', 'musicVolume', 0, 1, 0.05, pct);
+        slider('Effets sonores', 'sfxVolume', 0, 1, 0.05, pct);
+        slider('Ambiance (pluie, grottes...)', 'ambientVolume', 0, 1, 0.05, pct);
+        const b = el('button', 'btn opt', f, 'Écouter un morceau');
+        b.addEventListener('click', () => { g.audio.init(); g.audio.playPiece(g.world ? g.world.dim : 'overworld'); });
+      } else if (tab === 'controls') {
+        slider('Sensibilité de la souris', 'sensitivity', 0.2, 3, 0.05, pct);
+        toggle('Inverser la souris', 'invertY');
+        toggle('S\'accroupir', 'toggleSneak', false, (v) => (v ? 'Basculer' : 'Maintenir'));
+        toggle('Sprinter', 'toggleSprint', false, (v) => (v ? 'Basculer' : 'Maintenir'));
+        note('Cliquez sur une touche puis appuyez sur la nouvelle touche ou un bouton de la souris. Échap annule.');
+        const btns = {};
+        const refresh = () => {
+          const conf = conflicts(s.keys);
+          for (const [a, b] of Object.entries(btns)) {
+            b.textContent = keyName(s.keys[a]);
+            b.classList.toggle('conflict', conf.has(a));
+            b.classList.remove('wait');
+          }
+        };
+        for (const cat of KEY_ACTIONS) {
+          header(cat.cat);
+          for (const [a, label] of cat.list) {
+            const row = el('div', 'opt keyrow', f);
+            el('span', '', row, label);
+            const b = el('button', 'btn keybtn', row);
+            btns[a] = b;
+            b.addEventListener('click', (e) => {
+              e.stopPropagation();
+              g.audio.ui('click');
+              refresh();
+              b.textContent = '> ? <';
+              b.classList.add('wait');
+              let onMouse = null;
+              const done = (code) => {
+                this.capture = null;
+                window.removeEventListener('mousedown', onMouse, true);
+                if (code && code !== 'Escape') s.keys[a] = code;
+                g.saveSettings();
+                refresh();
+              };
+              onMouse = (ev) => { ev.preventDefault(); ev.stopPropagation(); done('Mouse' + ev.button); };
+              this.capture = done;
+              setTimeout(() => { if (this.capture === done) window.addEventListener('mousedown', onMouse, true); }, 0);
+            });
+          }
+        }
+        refresh();
+        const r = el('button', 'btn opt wide', f, 'Réinitialiser les touches');
+        r.addEventListener('click', () => { s.keys = Object.assign({}, DEFAULT_KEYS); g.saveSettings(); g.audio.ui('click'); refresh(); });
+      } else if (tab === 'game') {
+        choice('Difficulté', 'difficulty', ['Paisible', 'Facile', 'Normale', 'Difficile']);
+        toggle('Garder l\'inventaire à la mort', 'keepInventory');
+        toggle('Cycle jour/nuit', 'doDaylightCycle');
+        toggle('Apparition des monstres', 'doMobSpawning');
+        toggle('Destructions par les créatures', 'mobGriefing');
+        toggle('Propagation du feu', 'fireSpread');
+        toggle('Régénération naturelle', 'naturalRegen');
+        toggle('Butin des créatures', 'mobLoot');
+      }
       const bar = el('div', 'row buttons', p);
-      this.button(bar, 'Terminé', () => { g.saveSettings(); back(); });
-    }, { dirt: g.state !== 'playing', back: () => { g.saveSettings(); back(); }, cls: 'optmenu' });
+      this.button(bar, 'Terminé', () => { this.capture = null; g.saveSettings(); back(); });
+    }, { dirt: g.state !== 'playing', back: () => { this.capture = null; g.saveSettings(); back(); }, cls: 'optmenu' });
   }
 
   // ----- progrès -----
@@ -680,13 +771,16 @@ export class UI {
         el('div', 'gdesc', s, d);
       }
       el('h3', '', box, 'Commandes');
+      const K = this.game.settings.keys;
+      const kn = (a) => keyName(K[a]);
       const keys = [
-        ['ZQSD / WASD', 'Se déplacer (touches physiques)'], ['Espace', 'Sauter / nager (double appui : voler en créatif)'], ['Maj gauche', 'S\'accroupir (ne tombe pas des bords)'],
-        ['Ctrl / double Z', 'Sprinter'], ['Clic gauche', 'Miner / attaquer'], ['Clic droit', 'Poser / utiliser / manger / tirer à l\'arc'], ['Clic molette', 'Choisir le bloc visé'],
-        ['1-9 / molette', 'Barre d\'action'], ['E', 'Inventaire'], ['Q', 'Jeter un objet (Ctrl+Q : toute la pile)'], ['T ou /', 'Chat et commandes (/help)'], ['L', 'Progrès'],
-        ['F1', 'Masquer l\'interface'], ['F2', 'Capture d\'écran'], ['F3', 'Informations de débogage'], ['F5', 'Changer de vue'], ['Échap', 'Pause'],
+        [kn('forward') + kn('left') + kn('back') + kn('right'), 'Se déplacer'], [kn('jump'), 'Sauter / nager (double appui : voler en créatif)'], [kn('sneak'), 'S\'accroupir (ne tombe pas des bords)'],
+        [kn('sprint') + ' / double ' + kn('forward'), 'Sprinter'], [kn('attack'), 'Miner / attaquer'], [kn('use'), 'Poser / utiliser / manger / tirer à l\'arc'], [kn('pickBlock'), 'Choisir le bloc visé'],
+        ['1-9 / molette', 'Barre d\'action'], [kn('inventory'), 'Inventaire'], [kn('drop'), 'Jeter un objet (Ctrl : toute la pile)'], [kn('chat') + ' ou ' + kn('command'), 'Chat et commandes (/help)'], [kn('advancements'), 'Progrès'],
+        [kn('zoom'), 'Zoom'], [kn('hideHud'), 'Masquer l\'interface'], [kn('screenshot'), 'Capture d\'écran'], [kn('debug'), 'Informations de débogage'], [kn('perspective'), 'Changer de vue'], ['Échap', 'Pause'],
         ['Inventaire', 'Maj+clic : déplacement rapide ; clic droit : moitié / un par un ; glisser : répartir ; double-clic : rassembler ; livre de recettes à droite'],
       ];
+      el('div', 'tip', box, 'Toutes les touches se changent dans Options → Commandes.');
       const tbl = el('div', 'keys', box);
       for (const [k, d] of keys) { const r = el('div', 'krow', tbl); el('span', 'key', r, k); el('span', '', r, d); }
       el('h3', '', box, 'Astuces');

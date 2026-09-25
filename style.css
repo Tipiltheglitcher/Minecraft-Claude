@@ -222,3 +222,17 @@ button.opt { background: #6f6f6f linear-gradient(#8a8a8a, #626262); color: #e0e0
 @media (max-width: 700px) {
   :root { --gs: 1.5 !important; }
 }
+
+/* ---------- Options en onglets ---------- */
+.tabs { display: flex; flex-wrap: wrap; justify-content: center; gap: calc(2px * var(--gs)); margin-bottom: calc(4px * var(--gs)); }
+.tabs .btn.tab { min-width: calc(60px * var(--gs)); }
+.tabs .btn.tab.sel { background: #3a3a3a; color: #ffffa0; box-shadow: inset 2px 2px 0 #222, inset -2px -2px 0 #555; }
+.optmenu .options { max-height: calc(100vh - 120px * var(--gs)); overflow-y: auto; padding-right: 4px; align-content: start; }
+.optcat { grid-column: 1 / -1; font-size: calc(8px * var(--gs)); color: #ffffa0; margin-top: calc(4px * var(--gs)); }
+.optnote { grid-column: 1 / -1; font-size: calc(6.5px * var(--gs)); color: #c8c8c8; background: rgba(0, 0, 0, 0.35); padding: 4px 6px; line-height: 1.35; }
+.opt.keyrow { flex-direction: row; align-items: center; justify-content: space-between; gap: 6px; }
+.opt.keyrow span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn.keybtn { min-width: calc(64px * var(--gs)); padding: calc(2px * var(--gs)) calc(4px * var(--gs)); font-size: calc(7px * var(--gs)); flex-shrink: 0; }
+.btn.keybtn.conflict { color: #ff5555; }
+.btn.keybtn.wait { color: #ffff55; background: #3a3a3a; }
+.btn.opt.wide { grid-column: 1 / -1; }

@@ -1,5 +1,5 @@
 // Construction des maillages des sections de chunk (16x16x16)
-import { BLOCKS, OPAQUE, RENDER, R_CUBE, R_CROSS, R_LIQUID, R_MODEL, R_CROP, ROT_FACE, U, D } from '../data/blocks.js';
+import { BLOCKS, OPAQUE, EMIT, RENDER, R_CUBE, R_CROSS, R_LIQUID, R_MODEL, R_CROP, ROT_FACE, U, D } from '../data/blocks.js';
 import { B } from '../data/ids.js';
 import { tex } from './textures.js';
 import { hash3 } from '../core/noise.js';
@@ -171,7 +171,7 @@ export function buildSection(world, chunk, sy) {
             const layer = texLayer(def.texFn(f, meta));
             const rot = def.rotFn ? def.rotFn(f, meta) : 0;
             const useTint = def.tintFn ? def.tintFn(f) : !!def.tint;
-            cubeFace(out, p, np, f, x, y, z, layer, rot, useTint ? tint : WHITE, smooth, 0);
+            cubeFace(out, p, np, f, x, y, z, layer, rot, useTint ? tint : WHITE, smooth, def.leaves ? 5 : EMIT[id] ? 7 : 0);
           }
         } else if (rt === R_CROSS || rt === R_CROP) {
           const tint = def.tint ? tintFor(def, chunk, x, z) : WHITE;
@@ -182,7 +182,7 @@ export function buildSection(world, chunk, sy) {
             const h = hash3(12345, wx0 + x, 0, wz0 + z);
             ox = ((h & 15) - 7.5) * 0.35; oz = (((h >> 4) & 15) - 7.5) * 0.35;
           }
-          if (rt === R_CROSS) crossQuads(out, x * 16 + ox, y * 16, z * 16 + oz, layer, l, tint, id === B.fire ? 4 : 0, id === B.fire ? 17 : 16);
+          if (rt === R_CROSS) crossQuads(out, x * 16 + ox, y * 16, z * 16 + oz, layer, l, tint, id === B.fire ? 4 : id === B.sugar_cane || id === B.cobweb ? 0 : 6, id === B.fire ? 17 : 16);
           else cropQuads(out, x * 16, y * 16, z * 16, layer, l, tint);
         } else if (rt === R_LIQUID) {
           liquid(out === transBuf ? transBuf : opaqueBuf, p, x, y, z, id, meta, def, chunk);
@@ -256,8 +256,8 @@ function cropQuads(out, bx, by, bz, layer, l, tint) {
   ];
   const uvs = [[0, 16], [16, 16], [16, 0], [0, 0]];
   for (const q of planes) {
-    for (let k = 0; k < 4; k++) out.v(bx + q[k][0], by + q[k][1] - 1, bz + q[k][2], uvs[k][0], uvs[k][1], layer, s, b, 235, tint[0], tint[1], tint[2], 0);
-    for (let k = 3; k >= 0; k--) out.v(bx + q[k][0], by + q[k][1] - 1, bz + q[k][2], uvs[k][0], uvs[k][1], layer, s, b, 235, tint[0], tint[1], tint[2], 0);
+    for (let k = 0; k < 4; k++) out.v(bx + q[k][0], by + q[k][1] - 1, bz + q[k][2], uvs[k][0], uvs[k][1], layer, s, b, 235, tint[0], tint[1], tint[2], 6);
+    for (let k = 3; k >= 0; k--) out.v(bx + q[k][0], by + q[k][1] - 1, bz + q[k][2], uvs[k][0], uvs[k][1], layer, s, b, 235, tint[0], tint[1], tint[2], 6);
   }
 }
 
@@ -403,7 +403,7 @@ function model(out, p, x, y, z, id, meta, def, chunk) {
           cuv[1] + (vmax > vmin ? (v - vmin) / (vmax - vmin) : 0) * (cuv[3] - cuv[1]),
         ]);
       }
-      const flags = bxd.anim || (id === B.nether_portal ? 3 : 0);
+      const flags = bxd.anim || (id === B.nether_portal ? 3 : EMIT[id] ? 7 : 0);
       for (let k = 0; k < 4; k++) {
         const c = cs[k];
         const [wx, wz] = rotPos(c[0], c[2], rot);

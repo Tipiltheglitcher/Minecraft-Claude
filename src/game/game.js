@@ -26,10 +26,14 @@ import { ITEMS } from '../data/items.js';
 import { SOLID, BLOCKS } from '../data/blocks.js';
 import { clamp, lookDir } from '../core/math.js';
 import { spawnEntity } from '../entity/registry.js';
+import { loadKeys } from './keybinds.js';
 
 const DEFAULT_SETTINGS = {
-  renderDistance: 7, fov: 70, sensitivity: 1, brightness: 0.35, volume: 0.8, musicVolume: 0.5, sfxVolume: 1, guiScale: 2, resolution: 1,
+  renderDistance: 7, fov: 70, sensitivity: 1, brightness: 0.35, volume: 0.8, musicVolume: 0.5, sfxVolume: 1, ambientVolume: 1, guiScale: 2, resolution: 1,
   difficulty: 2, particles: 2, fancyLeaves: true, smoothLighting: true, clouds: true, viewBobbing: true, invertY: false,
+  toggleSneak: false, toggleSprint: false, keys: null,
+  shaders: 0, shaderShadows: true, shaderShadowQuality: 1, shaderShadowDist: 64, shaderWaving: true, shaderWater: true, shaderBloom: true, shaderGodrays: true,
+  shaderVignette: true, shaderExposure: 1, shaderSaturation: 1.1,
   keepInventory: false, doDaylightCycle: true, doMobSpawning: true, mobGriefing: true, fireSpread: true, naturalRegen: true, mobLoot: true,
 };
 
@@ -85,17 +89,19 @@ export class Game {
   loadSettings() {
     let s = {};
     try { s = JSON.parse(localStorage.getItem('mcjs-settings') || '{}'); } catch (e) { s = {}; }
-    return Object.assign({}, DEFAULT_SETTINGS, s);
+    const out = Object.assign({}, DEFAULT_SETTINGS, s);
+    out.keys = loadKeys(s.keys);
+    return out;
   }
 
   saveSettings() {
     try { localStorage.setItem('mcjs-settings', JSON.stringify(this.settings)); } catch (e) { /* ignoré */ }
   }
 
-  applySettings() {
+  applySettings(remesh = false) {
     document.documentElement.style.setProperty('--gs', this.settings.guiScale);
     this.audio.applyVolumes();
-    for (const w of Object.values(this.worlds)) for (const c of w.chunks.values()) c.markAllDirty();
+    if (remesh) for (const w of Object.values(this.worlds)) for (const c of w.chunks.values()) c.markAllDirty();
     this.saveSettings();
   }
 
@@ -362,13 +368,14 @@ export class Game {
       console.error(e);
       if (!this._errShown) { this._errShown = true; this.ui.chat('Erreur : ' + e.message, '#f55'); }
     }
+    try { this.audio.update(); } catch (e) { /* audio facultatif */ }
     this.input.endFrame();
   }
 
   frameInput() {
     const inp = this.input, p = this.player, s = this.settings;
     if (this.ui.screenOpen()) return;
-    const sens = 0.0022 * s.sensitivity;
+    const sens = 0.0022 * s.sensitivity * (this.zooming ? 0.3 : 1);
     if (!p.dead && !p.sleeping) {
       p.yaw -= inp.mouse.dx * sens;
       p.pitch -= inp.mouse.dy * sens * (s.invertY ? -1 : 1);
@@ -378,22 +385,31 @@ export class Game {
       p.inventory.sel = (p.inventory.sel + inp.mouse.wheel + 9) % 9;
       p.inventory.changed();
     }
-    for (let i = 1; i <= 9; i++) if (inp.wasPressed('Digit' + i)) { p.inventory.sel = i - 1; p.inventory.changed(); }
+    for (let i = 1; i <= 9; i++) if (inp.hitFrame('hotbar' + i)) { p.inventory.sel = i - 1; p.inventory.changed(); }
+    // zoom (touche maintenue)
+    this.zooming = inp.held('zoom') && !p.dead;
   }
 
   tick() {
-    const p = this.player, w = this.world, inp = this.input;
+    const p = this.player, w = this.world, inp = this.input, s = this.settings;
     // entrées -> joueur
     if (!this.ui.screenOpen() && !p.dead) {
-      const d = (c) => inp.down(c);
-      let fwd = (d('KeyW') || d('ArrowUp') ? 1 : 0) - (d('KeyS') || d('ArrowDown') ? 1 : 0);
-      let str = (d('KeyD') || d('ArrowRight') ? 1 : 0) - (d('KeyA') || d('ArrowLeft') ? 1 : 0);
+      const h = (a) => inp.held(a);
+      let fwd = (h('forward') ? 1 : 0) - (h('back') ? 1 : 0);
+      let str = (h('right') ? 1 : 0) - (h('left') ? 1 : 0);
       if (inp.touch.moveId !== null) { fwd = clamp(-inp.touch.my, -1, 1); str = clamp(inp.touch.mx, -1, 1); }
-      if (inp.tickPressed.has('double_KeyW')) this.sprintToggle = true;
-      if (fwd <= 0) this.sprintToggle = false;
-      if (inp.tickPressed.has('double_Space') && p.creative) { p.flying = !p.flying; if (p.gamemode === 'spectator') p.flying = true; }
-      p.input = { forward: fwd, strafe: str, jump: d('Space'), sneak: d('ShiftLeft') || d('ShiftRight'), sprint: d('ControlLeft') || d('ControlRight') || this.sprintToggle };
-      if (inp.tickPressed.has('KeyQ') && !p.dead) this.interaction.dropSelected(d('ControlLeft') || d('ControlRight'));
+      if (inp.doubleHit('forward')) this.sprintToggle = true;
+      // modes « basculer » pour s'accroupir et sprinter
+      if (s.toggleSneak && inp.hit('sneak')) this.sneakLatch = !this.sneakLatch;
+      if (!s.toggleSneak) this.sneakLatch = false;
+      if (s.toggleSprint && inp.hit('sprint')) this.sprintLatch = !this.sprintLatch;
+      if (!s.toggleSprint) this.sprintLatch = false;
+      if (fwd <= 0) { this.sprintToggle = false; }
+      if (inp.doubleHit('jump') && p.creative) { p.flying = !p.flying; if (p.gamemode === 'spectator') p.flying = true; }
+      const sneak = s.toggleSneak ? this.sneakLatch : h('sneak');
+      const sprint = (s.toggleSprint ? this.sprintLatch : h('sprint')) || this.sprintToggle;
+      p.input = { forward: fwd, strafe: str, jump: h('jump'), sneak, sprint };
+      if (inp.hit('drop') && !p.dead) this.interaction.dropSelected(h('sprint') || inp.down('ControlLeft') || inp.down('ControlRight'));
     } else p.input = { forward: 0, strafe: 0, jump: false, sneak: false, sprint: false };
     if (p.gamemode === 'spectator') { p.noClip = true; p.flying = true; }
     if (!this.ui.screen && !this.ui.menu && !this.spectator) this.interaction.tick(inp);
@@ -442,8 +458,8 @@ export class Game {
 
   tickAmbient() {
     const p = this.player, w = this.world;
-    if (Math.random() < 0.002 && w.dim === 'overworld' && w.getSky(Math.floor(p.x), Math.floor(p.y + 1), Math.floor(p.z)) < 3 && p.y < 50) {
-      this.audio.play('ghast', p.x + (Math.random() - 0.5) * 20, p.y - 5, p.z + (Math.random() - 0.5) * 20, 0.25, 0.4);
+    if (Math.random() < 0.0015 && w.dim === 'overworld' && w.getSky(Math.floor(p.x), Math.floor(p.y + 1), Math.floor(p.z)) < 3 && p.y < 50) {
+      this.audio.play('cave', p.x + (Math.random() - 0.5) * 20, p.y - 5, p.z + (Math.random() - 0.5) * 20, 0.7, 0.8 + Math.random() * 0.4);
     }
     if (w.dim === 'nether' && Math.random() < 0.003) this.audio.play('blaze', p.x + (Math.random() - 0.5) * 20, p.y, p.z + (Math.random() - 0.5) * 20, 0.3, 0.5);
     // bruits de feu et de portail proches

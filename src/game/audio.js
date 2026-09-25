@@ -1,5 +1,17 @@
-// Moteur audio procédural (Web Audio API) : bruitages et musique générative
+// Moteur audio (Web Audio API) : bruitages pré-calculés, ambiances et musique générative
 import { BLOCKS } from '../data/blocks.js';
+import { B } from '../data/ids.js';
+import { synth, synthLoop, variantCount, SOUND_NAMES, pianoNote, PIANO_RATE } from './sfx.js';
+
+// Ordre de pré-calcul : les sons les plus fréquents d'abord
+const PRIORITY = ['click', 'pop', 'mat_grass_step', 'mat_stone_step', 'mat_gravel_step', 'mat_wood_step', 'mat_sand_step', 'mat_grass', 'mat_stone', 'mat_gravel', 'mat_wood', 'player_hurt', 'eat', 'burp', 'xp', 'swim', 'splash'];
+const BIG = new Set(['explode', 'ghast', 'ghast_shoot', 'ghast_warn', 'ghast_death', 'levelup', 'portal_travel', 'thunder', 'end_portal', 'enderman_scream', 'cave']);
+// Gain de base par son (les échantillons sont tous normalisés)
+const GAIN = {
+  hiss: 0.6, fuse: 0.55, fire: 0.45, portal: 0.5, portal_travel: 0.6, explode: 1.1, thunder: 1.1, cave: 0.5,
+  click: 0.5, pop: 0.55, xp: 0.45, levelup: 0.6, toast: 0.55, challenge: 0.6, eat: 0.6, drink: 0.6,
+  blaze: 0.55, dragon_flap: 0.8, swim: 0.5, rain: 0.35, mat_cloth: 0.8, mat_cloth_step: 0.8, fizz: 0.5,
+};
 
 export class Audio {
   constructor(game) {
@@ -8,6 +20,71 @@ export class Audio {
     this.listener = { x: 0, y: 0, z: 0, yaw: 0 };
     this.musicTimer = 20 * 30;
     this.playing = 0;
+    this.data = new Map();     // nom -> [données par variante]
+    this.buffers = new Map();  // nom -> [AudioBuffer]
+    this.piano = new Map();    // note MIDI -> Float32Array
+    this.pianoBufs = new Map();
+    this.loops = {};
+    this.queue = [];
+    this.pumping = false;
+    this.envState = { under: false, reverb: 0.1 };
+    // pré-calcul en tâche de fond pendant l'écran titre
+    const order = [...PRIORITY, ...SOUND_NAMES.filter((n) => !PRIORITY.includes(n))];
+    for (const n of order) for (let v = 0; v < variantCount(n); v++) this.queue.push(() => this.ensureData(n, v));
+    for (const m of [48, 52, 55, 57, 60, 62, 64, 67, 69, 72]) this.queue.push(() => this.ensurePiano(m));
+    setTimeout(() => this.pump(), 200);
+  }
+
+  pump() {
+    this.pumping = true;
+    const t0 = performance.now();
+    const budget = this.game.state === 'playing' ? 4 : 12;
+    while (this.queue.length && performance.now() - t0 < budget) {
+      try { this.queue.shift()(); } catch (e) { console.warn(e); }
+    }
+    if (this.queue.length) setTimeout(() => this.pump(), 16);
+    else this.pumping = false;
+  }
+
+  enqueue(fn) {
+    this.queue.push(fn);
+    if (!this.pumping) setTimeout(() => this.pump(), 0);
+  }
+
+  ensureData(name, v) {
+    let arr = this.data.get(name);
+    if (!arr) { arr = []; this.data.set(name, arr); }
+    if (!arr[v]) arr[v] = synth(name, v);
+    return arr[v];
+  }
+
+  ensurePiano(m) {
+    if (!this.piano.has(m)) this.piano.set(m, pianoNote(m, 0.7));
+    return this.piano.get(m);
+  }
+
+  toBuffer(d) {
+    const b = this.ctx.createBuffer(d.channels.length, d.channels[0].length, d.rate);
+    d.channels.forEach((c, i) => b.copyToChannel ? b.copyToChannel(c, i) : b.getChannelData(i).set(c));
+    return b;
+  }
+
+  getBuffer(name, v) {
+    let arr = this.buffers.get(name);
+    if (!arr) { arr = []; this.buffers.set(name, arr); }
+    if (!arr[v]) arr[v] = this.toBuffer(this.ensureData(name, v));
+    return arr[v];
+  }
+
+  pianoBuffer(m) {
+    let b = this.pianoBufs.get(m);
+    if (!b) {
+      const d = this.ensurePiano(m);
+      b = this.ctx.createBuffer(1, d.length, PIANO_RATE);
+      b.getChannelData(0).set(d);
+      this.pianoBufs.set(m, b);
+    }
+    return b;
   }
 
   init() {
@@ -23,31 +100,59 @@ export class Audio {
       return;
     }
     const ctx = this.ctx;
+    // master -> compresseur -> sortie
+    this.comp = ctx.createDynamicsCompressor();
+    this.comp.threshold.value = -14; this.comp.knee.value = 12; this.comp.ratio.value = 4;
+    this.comp.attack.value = 0.004; this.comp.release.value = 0.2;
+    this.comp.connect(ctx.destination);
     this.master = ctx.createGain();
-    this.master.connect(ctx.destination);
+    this.master.connect(this.comp);
+    // bus des bruitages : filtre (sous l'eau) + envoi vers la réverbération
     this.sfx = ctx.createGain();
-    this.sfx.connect(this.master);
+    this.lowpass = ctx.createBiquadFilter();
+    this.lowpass.type = 'lowpass';
+    this.lowpass.frequency.value = 20000;
+    this.sfx.connect(this.lowpass);
+    this.lowpass.connect(this.master);
+    this.reverb = ctx.createConvolver();
+    this.reverb.buffer = this.makeImpulse(2.6);
+    this.reverbOut = ctx.createGain();
+    this.reverbOut.gain.value = 1;
+    this.reverb.connect(this.reverbOut);
+    this.reverbOut.connect(this.master);
+    this.sfxSend = ctx.createGain();
+    this.sfxSend.gain.value = 0.1;
+    this.lowpass.connect(this.sfxSend);
+    this.sfxSend.connect(this.reverb);
+    // ambiances en boucle
+    this.amb = ctx.createGain();
+    this.amb.connect(this.lowpass);
+    // musique
     this.musicGain = ctx.createGain();
     this.musicGain.connect(this.master);
-    // bruit blanc
-    const len = ctx.sampleRate * 2;
-    this.noise = ctx.createBuffer(1, len, ctx.sampleRate);
-    const d = this.noise.getChannelData(0);
-    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
-    // réverbération
-    this.reverb = ctx.createConvolver();
-    const rl = ctx.sampleRate * 3;
-    const ir = ctx.createBuffer(2, rl, ctx.sampleRate);
+    this.musicSend = ctx.createGain();
+    this.musicSend.gain.value = 0.35;
+    this.musicGain.connect(this.musicSend);
+    this.musicSend.connect(this.reverb);
+    this.applyVolumes();
+  }
+
+  // Réponse impulsionnelle : bruit stéréo à décroissance exponentielle, qui s'assombrit
+  makeImpulse(sec) {
+    const ctx = this.ctx;
+    const n = Math.floor(ctx.sampleRate * sec);
+    const ir = ctx.createBuffer(2, n, ctx.sampleRate);
     for (let c = 0; c < 2; c++) {
       const ch = ir.getChannelData(c);
-      for (let i = 0; i < rl; i++) ch[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / rl, 3);
+      let lp = 0;
+      for (let i = 0; i < n; i++) {
+        const u = i / n;
+        const k = 0.9 - 0.8 * u; // filtre passe-bas de plus en plus fermé
+        lp += ((Math.random() * 2 - 1) - lp) * k;
+        ch[i] = lp * Math.exp(-u * 6.5) * (i < 200 ? i / 200 : 1);
+      }
     }
-    this.reverb.buffer = ir;
-    this.reverbGain = ctx.createGain();
-    this.reverbGain.gain.value = 0.35;
-    this.reverb.connect(this.reverbGain);
-    this.reverbGain.connect(this.master);
-    this.applyVolumes();
+    return ir;
   }
 
   applyVolumes() {
@@ -55,17 +160,79 @@ export class Audio {
     const s = this.game.settings;
     this.master.gain.value = s.volume;
     this.sfx.gain.value = s.sfxVolume;
-    this.musicGain.gain.value = s.musicVolume * 0.5;
+    this.amb.gain.value = s.sfxVolume * (s.ambientVolume ?? 1);
+    this.musicGain.gain.value = s.musicVolume * 0.55;
   }
 
   setListener(x, y, z, yaw) {
     this.listener.x = x; this.listener.y = y; this.listener.z = z; this.listener.yaw = yaw;
   }
 
-  // ---------- primitives ----------
+  // ---------- environnement (appelé à chaque image) ----------
+  update() {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const g = this.game, now = ctx.currentTime;
+    const playing = (g.state === 'playing' || g.state === 'credits') && g.world && g.player && !g.paused;
+    let under = false, reverb = 0.08, rain = 0, dimLoop = null, dimVol = 0;
+    if (playing) {
+      const p = g.player, w = g.world;
+      const hx = Math.floor(p.x), hy = Math.floor(p.y + p.eyeHeight()), hz = Math.floor(p.z);
+      const hid = w.getBlock(hx, hy, hz);
+      under = hid === B.water || hid === B.lava;
+      if (w.dim === 'overworld') {
+        const sky = w.getSky(hx, hy, hz);
+        const enclosed = 1 - sky / 15;
+        reverb = 0.06 + 0.55 * enclosed * enclosed;
+        rain = g.weather.strength * Math.min(1, sky / 12) * (under ? 0.3 : 1);
+      } else if (w.dim === 'nether') { reverb = 0.35; dimLoop = 'nether'; dimVol = 0.55; }
+      else { reverb = 0.28; dimLoop = 'end'; dimVol = 0.45; }
+    }
+    const st = this.envState;
+    if (under !== st.under) {
+      st.under = under;
+      this.lowpass.frequency.setTargetAtTime(under ? 650 : 20000, now, 0.06);
+    }
+    if (Math.abs(reverb - st.reverb) > 0.01) {
+      st.reverb = reverb;
+      this.sfxSend.gain.setTargetAtTime(reverb, now, 0.4);
+    }
+    this.setLoop('rain', rain * 0.9);
+    this.setLoop('nether', dimLoop === 'nether' ? dimVol : 0);
+    this.setLoop('end', dimLoop === 'end' ? dimVol : 0);
+    this.setLoop('underwater', under ? 0.8 : 0);
+  }
+
+  setLoop(name, vol) {
+    let L = this.loops[name];
+    if (!L) {
+      if (vol <= 0.001) return;
+      L = this.loops[name] = { vol: 0, pending: true };
+      this.enqueue(() => {
+        const d = synthLoop(name);
+        const src = this.ctx.createBufferSource();
+        src.buffer = this.toBuffer(d);
+        src.loop = true;
+        const gn = this.ctx.createGain();
+        gn.gain.value = 0;
+        src.connect(gn);
+        gn.connect(this.amb);
+        src.start();
+        L.src = src; L.gain = gn; L.pending = false; L.vol = -1;
+      });
+      return;
+    }
+    if (L.pending) return;
+    const v = vol * (GAIN[name] ?? 1);
+    if (Math.abs(v - L.vol) > 0.005) {
+      L.vol = v;
+      L.gain.gain.setTargetAtTime(v, this.ctx.currentTime, 0.5);
+    }
+  }
+
+  // ---------- lecture ----------
   out(x, y, z, vol, range = 16) {
     const ctx = this.ctx;
-    const g = ctx.createGain();
     let v = vol;
     let pan = 0;
     if (x !== undefined && x !== null) {
@@ -73,100 +240,63 @@ export class Audio {
       const dx = x - L.x, dy = y - L.y, dz = z - L.z;
       const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
       if (d > range) return null;
+      // atténuation linéaire façon Minecraft, adoucie près de la source
       v *= Math.max(0, 1 - d / range);
-      // panoramique : projection sur le vecteur droite
       const rx = Math.cos(L.yaw), rz = -Math.sin(L.yaw);
-      pan = d > 0.5 ? Math.max(-1, Math.min(1, (dx * rx + dz * rz) / d)) * 0.8 : 0;
+      pan = d > 0.5 ? Math.max(-1, Math.min(1, (dx * rx + dz * rz) / d)) * 0.75 : 0;
     }
-    if (v < 0.01) return null;
+    if (v < 0.005) return null;
+    const g = ctx.createGain();
     g.gain.value = v;
     if (ctx.createStereoPanner) {
       const p = ctx.createStereoPanner();
       p.pan.value = pan;
       g.connect(p);
       p.connect(this.sfx);
+      g._p = p;
     } else g.connect(this.sfx);
     return g;
   }
 
-  noiseBurst(dest, t0, dur, { type = 'bandpass', freq = 1000, q = 1, vol = 1, attack = 0.005, freqEnd, rate = 1 } = {}) {
-    const ctx = this.ctx;
-    const src = ctx.createBufferSource();
-    src.buffer = this.noise;
-    src.playbackRate.value = rate;
-    const f = ctx.createBiquadFilter();
-    f.type = type;
-    f.frequency.setValueAtTime(freq, t0);
-    if (freqEnd) f.frequency.exponentialRampToValueAtTime(freqEnd, t0 + dur);
-    f.Q.value = q;
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.0001, t0);
-    g.gain.exponentialRampToValueAtTime(vol, t0 + attack);
-    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-    src.connect(f); f.connect(g); g.connect(dest);
-    src.start(t0, Math.random() * 1.5);
-    src.stop(t0 + dur + 0.05);
-  }
-
-  tone(dest, t0, dur, { type = 'sine', freq = 440, freqEnd, vol = 0.5, attack = 0.005, vibrato = 0, vibRate = 6, filter, release } = {}) {
-    const ctx = this.ctx;
-    const o = ctx.createOscillator();
-    o.type = type;
-    o.frequency.setValueAtTime(freq, t0);
-    if (freqEnd) o.frequency.exponentialRampToValueAtTime(Math.max(1, freqEnd), t0 + dur);
-    if (vibrato) {
-      const l = ctx.createOscillator();
-      const lg = ctx.createGain();
-      l.frequency.value = vibRate;
-      lg.gain.value = vibrato;
-      l.connect(lg); lg.connect(o.frequency);
-      l.start(t0); l.stop(t0 + dur + 0.1);
-    }
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.0001, t0);
-    g.gain.exponentialRampToValueAtTime(vol, t0 + attack);
-    g.gain.exponentialRampToValueAtTime(0.0001, t0 + (release || dur));
-    let last = o;
-    if (filter) {
-      const f = ctx.createBiquadFilter();
-      f.type = 'lowpass';
-      f.frequency.value = filter;
-      o.connect(f);
-      last = f;
-    }
-    last.connect(g);
-    g.connect(dest);
-    o.start(t0);
-    o.stop(t0 + (release || dur) + 0.05);
-  }
-
-  // ---------- sons ----------
   play(name, x, y, z, vol = 1, pitch = 1) {
-    if (!this.ctx || !this.game.settings) return;
-    if (this.playing > 40) return;
-    const gen = SOUNDS[name];
-    if (!gen) return;
-    const range = BIG.has(name) ? 64 : name.startsWith('dragon') ? 128 : 16;
-    const dest = this.out(x, y, z, vol, range);
+    if (!this.ctx || this.ctx.state === 'closed' || !this.game.settings) return;
+    if (this.playing > 48) return;
+    const nv = variantCount(name);
+    if (!nv) return;
+    const range = name.startsWith('dragon') ? 128 : BIG.has(name) ? 64 : 16;
+    const dest = this.out(x, y, z, vol * (GAIN[name] ?? 1), range);
     if (!dest) return;
-    const t0 = this.ctx.currentTime + 0.01;
-    this.playing++;
-    setTimeout(() => this.playing--, 300);
+    let buffer;
     try {
-      gen(this, dest, t0, pitch * (0.95 + Math.random() * 0.1));
+      buffer = this.getBuffer(name, Math.floor(Math.random() * nv));
     } catch (e) {
-      // ignore
+      return;
     }
+    const src = this.ctx.createBufferSource();
+    src.buffer = buffer;
+    src.playbackRate.value = pitch * (0.94 + Math.random() * 0.12);
+    src.connect(dest);
+    this.playing++;
+    src.onended = () => {
+      this.playing--;
+      src.disconnect();
+      dest.disconnect();
+      if (dest._p) dest._p.disconnect();
+    };
+    src.start(this.ctx.currentTime + 0.005);
   }
 
   ui(name) {
-    this.play(name, null, null, null, 0.6, 1);
+    this.play(name, null, null, null, 0.8, 1);
   }
 
+  // Sons de blocs : même logique que Minecraft (casser/poser, pas, frappe pendant le minage)
   blockSound(material, action, x, y, z) {
     const m = material || 'stone';
-    const vol = action === 'step' ? 0.25 : action === 'hit' ? 0.2 : action === 'place' ? 0.7 : 0.8;
-    this.play('mat_' + m + (action === 'step' || action === 'hit' ? '_step' : ''), x, y, z, vol, action === 'place' ? 0.85 : action === 'hit' ? 0.6 : 1);
+    const step = action === 'step' || action === 'hit';
+    const vol = action === 'step' ? 0.3 : action === 'hit' ? 0.3 : 0.9;
+    const pitch = action === 'hit' ? 0.6 : action === 'step' ? 1 : 0.85;
+    this.play('mat_' + m + (step ? '_step' : ''), x, y, z, vol, pitch);
   }
 
   step(blockId, x, y, z) {
@@ -179,196 +309,150 @@ export class Audio {
   tickMusic() {
     if (!this.ctx || this.game.settings.musicVolume <= 0) return;
     if (--this.musicTimer > 0) return;
-    this.musicTimer = 20 * (60 + Math.random() * 120);
+    this.musicTimer = 20 * (90 + Math.random() * 150);
     this.playPiece(this.game.world ? this.game.world.dim : 'overworld');
   }
 
   playPiece(dim) {
-    const ctx = this.ctx;
-    const scales = {
-      overworld: [[0, 2, 4, 7, 9], [0, 3, 5, 7, 10], [0, 2, 4, 5, 7, 9, 11]],
-      nether: [[0, 1, 5, 6, 8], [0, 3, 6, 8, 11]],
-      end: [[0, 2, 3, 7, 8], [0, 5, 7, 10]],
-      menu: [[0, 4, 7, 9, 11, 14]],
-    };
-    const sc = scales[dim] || scales.overworld;
-    const scale = sc[Math.floor(Math.random() * sc.length)];
-    const root = dim === 'nether' ? 45 : dim === 'end' ? 50 : 52 + Math.floor(Math.random() * 7);
-    const n = 10 + Math.floor(Math.random() * 16);
-    let t = ctx.currentTime + 0.5;
-    let deg = Math.floor(Math.random() * scale.length);
-    const dest = ctx.createGain();
-    dest.gain.value = 0.9;
-    dest.connect(this.musicGain);
-    dest.connect(this.reverb);
-    for (let i = 0; i < n; i++) {
-      deg += Math.floor(Math.random() * 5) - 2;
-      deg = Math.max(0, Math.min(scale.length * 2 - 1, deg));
-      const oct = Math.floor(deg / scale.length);
-      const midi = root + scale[deg % scale.length] + oct * 12;
-      this.pianoNote(dest, t, midi, 0.18 + Math.random() * 0.08, dim);
-      if (Math.random() < 0.3) this.pianoNote(dest, t, midi - 12, 0.1, dim);
-      if (Math.random() < 0.15) this.pianoNote(dest, t, midi + (scale[(deg + 2) % scale.length] - scale[deg % scale.length]), 0.08, dim);
-      t += [0.5, 0.75, 1, 1, 1.5, 2][Math.floor(Math.random() * 6)] * (dim === 'end' ? 1.4 : 1);
-    }
+    const piece = compose(dim);
+    this.schedule(piece);
   }
 
-  pianoNote(dest, t0, midi, vol, dim) {
-    const ctx = this.ctx;
-    const f = 440 * Math.pow(2, (midi - 69) / 12);
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.0001, t0);
-    g.gain.exponentialRampToValueAtTime(vol, t0 + 0.01);
-    g.gain.exponentialRampToValueAtTime(vol * 0.4, t0 + 0.3);
-    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 3.5);
-    g.connect(dest);
-    const types = dim === 'nether' ? ['triangle', 'sawtooth'] : ['sine', 'triangle'];
-    types.forEach((type, i) => {
-      const o = ctx.createOscillator();
-      o.type = type;
-      o.frequency.value = f * (i ? 2.001 : 1);
-      const og = ctx.createGain();
-      og.gain.value = i ? 0.15 : 1;
-      if (type === 'sawtooth') {
-        const fl = ctx.createBiquadFilter();
-        fl.type = 'lowpass'; fl.frequency.value = 900;
-        o.connect(fl); fl.connect(og);
-      } else o.connect(og);
-      og.connect(g);
-      o.start(t0);
-      o.stop(t0 + 3.6);
+  // Prépare les notes nécessaires en tâche de fond, puis programme le morceau
+  schedule(piece) {
+    for (const m of new Set(piece.notes.map((n) => n.m))) if (!this.piano.has(m)) this.enqueue(() => this.ensurePiano(m));
+    this.enqueue(() => {
+      const ctx = this.ctx;
+      if (!ctx) return;
+      const t0 = ctx.currentTime + 0.4;
+      const dest = ctx.createGain();
+      dest.gain.value = 1;
+      dest.connect(this.musicGain);
+      for (const n of piece.notes) {
+        const src = ctx.createBufferSource();
+        src.buffer = this.pianoBuffer(n.m);
+        const g = ctx.createGain();
+        g.gain.value = n.v;
+        src.connect(g);
+        g.connect(dest);
+        src.start(t0 + n.t);
+        src.onended = () => { src.disconnect(); g.disconnect(); };
+      }
+      for (const p of piece.pads) this.pad(dest, t0 + p.t, p.d, p.ms, p.v);
     });
   }
 
-  // Jingle de victoire (générique)
+  // Nappe douce : dents de scie désaccordées, filtre fermé, attaque lente
+  pad(dest, t0, dur, midis, vol) {
+    const ctx = this.ctx;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(vol, t0 + dur * 0.35);
+    g.gain.setValueAtTime(vol, t0 + dur * 0.6);
+    g.gain.linearRampToValueAtTime(0.0001, t0 + dur);
+    const f = ctx.createBiquadFilter();
+    f.type = 'lowpass';
+    f.frequency.value = 700;
+    f.Q.value = 0.5;
+    f.connect(g);
+    g.connect(dest);
+    for (const m of midis) {
+      for (const det of [-6, 5]) {
+        const o = ctx.createOscillator();
+        o.type = 'sawtooth';
+        o.frequency.value = 440 * Math.pow(2, (m - 69) / 12);
+        o.detune.value = det;
+        const og = ctx.createGain();
+        og.gain.value = 0.08 / midis.length;
+        o.connect(og);
+        og.connect(f);
+        o.start(t0);
+        o.stop(t0 + dur + 0.1);
+      }
+    }
+  }
+
+  // Thème du générique
   playCredits() {
     if (!this.ctx) return;
-    const dest = this.ctx.createGain();
-    dest.gain.value = 1;
-    dest.connect(this.musicGain);
-    dest.connect(this.reverb);
-    const prog = [[57, 60, 64], [53, 57, 60], [48, 52, 55], [55, 59, 62]];
-    let t = this.ctx.currentTime + 0.5;
-    for (let r = 0; r < 8; r++)
-      for (const chord of prog) {
-        for (const m of chord) this.pianoNote(dest, t, m, 0.08, 'overworld');
-        this.pianoNote(dest, t + 0.75, chord[2] + 12, 0.1, 'overworld');
-        this.pianoNote(dest, t + 1.5, chord[1] + 12, 0.08, 'overworld');
-        t += 2.4;
-      }
+    this.schedule(compose('credits'));
   }
 }
 
-const BIG = new Set(['explode', 'ghast', 'ghast_shoot', 'ghast_warn', 'ghast_death', 'levelup', 'portal_travel', 'thunder', 'end_portal', 'enderman_scream']);
-
-// Générateurs : (audio, destination, t0, pitch)
-const SOUNDS = {
-  mat_stone: (a, d, t, p) => { a.noiseBurst(d, t, 0.15, { freq: 1800 * p, q: 1.5, vol: 0.8 }); a.noiseBurst(d, t + 0.02, 0.1, { freq: 800 * p, q: 2, vol: 0.4 }); },
-  mat_stone_step: (a, d, t, p) => a.noiseBurst(d, t, 0.08, { freq: 1600 * p, q: 1.2, vol: 0.7 }),
-  mat_wood: (a, d, t, p) => { a.noiseBurst(d, t, 0.12, { type: 'lowpass', freq: 900 * p, vol: 0.7 }); a.tone(d, t, 0.15, { type: 'triangle', freq: 220 * p, freqEnd: 150 * p, vol: 0.5 }); },
-  mat_wood_step: (a, d, t, p) => { a.noiseBurst(d, t, 0.07, { type: 'lowpass', freq: 800 * p, vol: 0.6 }); a.tone(d, t, 0.08, { type: 'triangle', freq: 200 * p, vol: 0.3 }); },
-  mat_gravel: (a, d, t, p) => { for (let i = 0; i < 4; i++) a.noiseBurst(d, t + i * 0.025, 0.06, { type: 'lowpass', freq: 700 * p, vol: 0.7 }); },
-  mat_gravel_step: (a, d, t, p) => { for (let i = 0; i < 2; i++) a.noiseBurst(d, t + i * 0.03, 0.05, { type: 'lowpass', freq: 600 * p, vol: 0.6 }); },
-  mat_grass: (a, d, t, p) => a.noiseBurst(d, t, 0.15, { type: 'highpass', freq: 1500 * p, vol: 0.5, freqEnd: 3000 }),
-  mat_grass_step: (a, d, t, p) => a.noiseBurst(d, t, 0.09, { type: 'bandpass', freq: 2500 * p, q: 0.7, vol: 0.4 }),
-  mat_sand: (a, d, t, p) => a.noiseBurst(d, t, 0.15, { type: 'highpass', freq: 2500 * p, vol: 0.5 }),
-  mat_sand_step: (a, d, t, p) => a.noiseBurst(d, t, 0.08, { type: 'highpass', freq: 2200 * p, vol: 0.4 }),
-  mat_glass: (a, d, t, p) => { for (let i = 0; i < 5; i++) a.tone(d, t + i * 0.02, 0.3, { freq: (1500 + Math.random() * 2500) * p, vol: 0.15 }); a.noiseBurst(d, t, 0.2, { type: 'highpass', freq: 4000, vol: 0.4 }); },
-  mat_glass_step: (a, d, t, p) => a.noiseBurst(d, t, 0.06, { freq: 3000 * p, q: 2, vol: 0.4 }),
-  mat_cloth: (a, d, t, p) => a.noiseBurst(d, t, 0.12, { type: 'lowpass', freq: 500 * p, vol: 0.6 }),
-  mat_cloth_step: (a, d, t, p) => a.noiseBurst(d, t, 0.08, { type: 'lowpass', freq: 400 * p, vol: 0.5 }),
-  mat_snow: (a, d, t, p) => { for (let i = 0; i < 3; i++) a.noiseBurst(d, t + i * 0.03, 0.07, { freq: 1200 * p, q: 0.8, vol: 0.4 }); },
-  mat_snow_step: (a, d, t, p) => a.noiseBurst(d, t, 0.08, { freq: 1100 * p, q: 0.8, vol: 0.4 }),
-  mat_metal: (a, d, t, p) => { a.tone(d, t, 0.4, { freq: 900 * p, vol: 0.25 }); a.tone(d, t, 0.35, { freq: 1370 * p, vol: 0.15 }); a.noiseBurst(d, t, 0.1, { freq: 3000, q: 3, vol: 0.4 }); },
-  mat_metal_step: (a, d, t, p) => { a.tone(d, t, 0.15, { freq: 800 * p, vol: 0.12 }); a.noiseBurst(d, t, 0.06, { freq: 2500, q: 3, vol: 0.3 }); },
-  pop: (a, d, t, p) => a.tone(d, t, 0.08, { freq: 500 * p, freqEnd: 1000 * p, vol: 0.4 }),
-  click: (a, d, t) => { a.tone(d, t, 0.04, { type: 'square', freq: 1800, vol: 0.15 }); },
-  player_hurt: (a, d, t, p) => { a.tone(d, t, 0.2, { type: 'sawtooth', freq: 200 * p, freqEnd: 110 * p, vol: 0.5, filter: 900 }); a.noiseBurst(d, t, 0.08, { type: 'lowpass', freq: 600, vol: 0.4 }); },
-  fall_small: (a, d, t) => a.noiseBurst(d, t, 0.15, { type: 'lowpass', freq: 400, vol: 0.8 }),
-  fall_big: (a, d, t) => { a.noiseBurst(d, t, 0.3, { type: 'lowpass', freq: 300, vol: 1 }); a.tone(d, t, 0.3, { freq: 80, freqEnd: 40, vol: 0.6 }); },
-  pig: (a, d, t, p) => { a.tone(d, t, 0.18, { type: 'square', freq: 260 * p, freqEnd: 180 * p, vol: 0.25, filter: 1200, vibrato: 30, vibRate: 30 }); a.tone(d, t + 0.22, 0.14, { type: 'square', freq: 240 * p, freqEnd: 170 * p, vol: 0.2, filter: 1200, vibrato: 30, vibRate: 30 }); },
-  pig_hurt: (a, d, t, p) => a.tone(d, t, 0.25, { type: 'square', freq: 500 * p, freqEnd: 300 * p, vol: 0.3, filter: 2000, vibrato: 40, vibRate: 25 }),
-  cow: (a, d, t, p) => a.tone(d, t, 1.0, { type: 'sawtooth', freq: 130 * p, freqEnd: 105 * p, vol: 0.35, filter: 700, attack: 0.1, vibrato: 3, vibRate: 5 }),
-  cow_hurt: (a, d, t, p) => a.tone(d, t, 0.4, { type: 'sawtooth', freq: 180 * p, freqEnd: 120 * p, vol: 0.4, filter: 900 }),
-  sheep: (a, d, t, p) => a.tone(d, t, 0.6, { type: 'sawtooth', freq: 320 * p, freqEnd: 290 * p, vol: 0.25, filter: 1500, vibrato: 25, vibRate: 12, attack: 0.05 }),
-  chicken: (a, d, t, p) => { for (let i = 0; i < 3; i++) a.tone(d, t + i * 0.09, 0.06, { type: 'square', freq: (900 + i * 100) * p, freqEnd: 700 * p, vol: 0.12, filter: 3000 }); },
-  chicken_hurt: (a, d, t, p) => a.tone(d, t, 0.15, { type: 'square', freq: 1200 * p, freqEnd: 800 * p, vol: 0.2, filter: 3000 }),
-  zombie: (a, d, t, p) => a.tone(d, t, 1.1, { type: 'sawtooth', freq: 95 * p, freqEnd: 75 * p, vol: 0.35, filter: 500, attack: 0.2, vibrato: 8, vibRate: 4 }),
-  zombie_hurt: (a, d, t, p) => a.tone(d, t, 0.35, { type: 'sawtooth', freq: 140 * p, freqEnd: 90 * p, vol: 0.4, filter: 700, vibrato: 10, vibRate: 12 }),
-  zombie_death: (a, d, t, p) => a.tone(d, t, 0.9, { type: 'sawtooth', freq: 120 * p, freqEnd: 50 * p, vol: 0.4, filter: 600 }),
-  skeleton: (a, d, t, p) => { for (let i = 0; i < 6; i++) a.noiseBurst(d, t + i * 0.05, 0.03, { freq: 2500 * p, q: 5, vol: 0.4 }); },
-  skeleton_hurt: (a, d, t, p) => { for (let i = 0; i < 4; i++) a.noiseBurst(d, t + i * 0.03, 0.03, { freq: 3000 * p, q: 4, vol: 0.5 }); },
-  skeleton_death: (a, d, t, p) => { for (let i = 0; i < 10; i++) a.noiseBurst(d, t + i * 0.04, 0.03, { freq: (2000 + Math.random() * 1500) * p, q: 5, vol: 0.4 }); },
-  creeper_hurt: (a, d, t, p) => a.noiseBurst(d, t, 0.3, { freq: 1500 * p, q: 0.8, vol: 0.4 }),
-  hiss: (a, d, t) => a.noiseBurst(d, t, 1.4, { type: 'highpass', freq: 2500, vol: 0.5, attack: 0.3, freqEnd: 5000 }),
-  fuse: (a, d, t) => a.noiseBurst(d, t, 1.2, { type: 'highpass', freq: 3000, vol: 0.4, attack: 0.1 }),
-  spider: (a, d, t, p) => { for (let i = 0; i < 3; i++) a.noiseBurst(d, t + i * 0.07, 0.06, { freq: 1800 * p, q: 3, vol: 0.4 }); },
-  spider_death: (a, d, t, p) => a.noiseBurst(d, t, 0.5, { freq: 1500 * p, q: 2, vol: 0.5, freqEnd: 500 }),
-  enderman: (a, d, t, p) => { a.tone(d, t, 0.6, { freq: 300 * p, freqEnd: 150 * p, vol: 0.25, vibrato: 40, vibRate: 7 }); a.tone(d, t + 0.3, 0.5, { freq: 150 * p, freqEnd: 350 * p, vol: 0.2 }); },
-  enderman_hurt: (a, d, t, p) => a.tone(d, t, 0.4, { type: 'sawtooth', freq: 400 * p, freqEnd: 200 * p, vol: 0.3, filter: 1500, vibrato: 50, vibRate: 20 }),
-  enderman_death: (a, d, t, p) => a.tone(d, t, 1.2, { type: 'sawtooth', freq: 300 * p, freqEnd: 60 * p, vol: 0.4, filter: 1200, vibrato: 30, vibRate: 10 }),
-  enderman_scream: (a, d, t, p) => { a.tone(d, t, 1.0, { type: 'sawtooth', freq: 700 * p, freqEnd: 900 * p, vol: 0.3, filter: 3000, vibrato: 80, vibRate: 15 }); a.noiseBurst(d, t, 0.8, { freq: 2000, q: 1, vol: 0.2 }); },
-  teleport: (a, d, t, p) => { a.tone(d, t, 0.35, { freq: 200 * p, freqEnd: 800 * p, vol: 0.3 }); a.tone(d, t + 0.1, 0.3, { freq: 800 * p, freqEnd: 200 * p, vol: 0.2 }); },
-  blaze: (a, d, t, p) => a.noiseBurst(d, t, 0.8, { type: 'lowpass', freq: 600 * p, vol: 0.5, attack: 0.2, freqEnd: 300 }),
-  blaze_hurt: (a, d, t, p) => a.noiseBurst(d, t, 0.3, { freq: 1200 * p, q: 1, vol: 0.5 }),
-  blaze_death: (a, d, t, p) => a.noiseBurst(d, t, 1, { type: 'lowpass', freq: 1500 * p, vol: 0.6, freqEnd: 100 }),
-  blaze_charge: (a, d, t) => a.noiseBurst(d, t, 0.6, { type: 'lowpass', freq: 400, vol: 0.5, attack: 0.3, freqEnd: 1200 }),
-  blaze_shoot: (a, d, t, p) => { a.noiseBurst(d, t, 0.3, { freq: 900 * p, q: 0.7, vol: 0.6 }); a.tone(d, t, 0.2, { type: 'sawtooth', freq: 150, freqEnd: 60, vol: 0.2, filter: 600 }); },
-  ghast: (a, d, t, p) => a.tone(d, t, 1.4, { freq: 420 * p, freqEnd: 260 * p, vol: 0.3, vibrato: 30, vibRate: 3, attack: 0.3 }),
-  ghast_hurt: (a, d, t, p) => a.tone(d, t, 0.6, { type: 'sawtooth', freq: 700 * p, freqEnd: 400 * p, vol: 0.3, filter: 2000 }),
-  ghast_death: (a, d, t, p) => a.tone(d, t, 1.6, { type: 'sawtooth', freq: 600 * p, freqEnd: 100 * p, vol: 0.4, filter: 2000, vibrato: 20, vibRate: 6 }),
-  ghast_warn: (a, d, t, p) => a.tone(d, t, 0.8, { type: 'sawtooth', freq: 900 * p, freqEnd: 1300 * p, vol: 0.3, filter: 3000, vibrato: 60, vibRate: 12 }),
-  ghast_shoot: (a, d, t) => { a.noiseBurst(d, t, 0.4, { type: 'lowpass', freq: 1200, vol: 0.7, freqEnd: 200 }); },
-  piglin: (a, d, t, p) => { a.tone(d, t, 0.2, { type: 'square', freq: 180 * p, freqEnd: 140 * p, vol: 0.25, filter: 900, vibrato: 20, vibRate: 25 }); },
-  piglin_hurt: (a, d, t, p) => a.tone(d, t, 0.3, { type: 'square', freq: 350 * p, freqEnd: 200 * p, vol: 0.3, filter: 1500, vibrato: 30, vibRate: 25 }),
-  piglin_angry: (a, d, t, p) => a.tone(d, t, 0.5, { type: 'sawtooth', freq: 250 * p, freqEnd: 400 * p, vol: 0.35, filter: 1500, vibrato: 30, vibRate: 25 }),
-  villager: (a, d, t, p) => a.tone(d, t, 0.35, { type: 'square', freq: 260 * p, freqEnd: 200 * p, vol: 0.15, filter: 900, vibrato: 10, vibRate: 8 }),
-  villager_hurt: (a, d, t, p) => a.tone(d, t, 0.3, { type: 'square', freq: 350 * p, freqEnd: 220 * p, vol: 0.2, filter: 1200 }),
-  golem_hurt: (a, d, t) => { a.tone(d, t, 0.3, { freq: 120, freqEnd: 80, vol: 0.4 }); a.noiseBurst(d, t, 0.2, { freq: 800, q: 3, vol: 0.3 }); },
-  golem_attack: (a, d, t) => a.noiseBurst(d, t, 0.3, { type: 'lowpass', freq: 500, vol: 0.8 }),
-  slime: (a, d, t, p) => { a.noiseBurst(d, t, 0.12, { type: 'lowpass', freq: 500 * p, vol: 0.5 }); a.tone(d, t, 0.12, { freq: 150 * p, freqEnd: 90 * p, vol: 0.3 }); },
-  explode: (a, d, t) => {
-    a.noiseBurst(d, t, 1.8, { type: 'lowpass', freq: 1200, vol: 1, freqEnd: 60 });
-    a.tone(d, t, 1.2, { freq: 70, freqEnd: 25, vol: 0.8 });
-  },
-  bow: (a, d, t, p) => { a.tone(d, t, 0.2, { type: 'triangle', freq: 400 * p, freqEnd: 150 * p, vol: 0.4 }); a.noiseBurst(d, t, 0.15, { type: 'highpass', freq: 2000, vol: 0.3 }); },
-  arrow_hit: (a, d, t, p) => a.noiseBurst(d, t, 0.1, { type: 'lowpass', freq: 800 * p, vol: 0.5 }),
-  ding: (a, d, t) => a.tone(d, t, 0.3, { freq: 1400, vol: 0.3 }),
-  eat: (a, d, t, p) => { for (let i = 0; i < 3; i++) a.noiseBurst(d, t + i * 0.06, 0.05, { freq: 1200 * p, q: 1, vol: 0.4 }); },
-  burp: (a, d, t) => a.tone(d, t, 0.3, { type: 'sawtooth', freq: 110, freqEnd: 80, vol: 0.3, filter: 500, vibrato: 15, vibRate: 30 }),
-  drink: (a, d, t) => { for (let i = 0; i < 3; i++) a.tone(d, t + i * 0.12, 0.08, { freq: 300 + i * 80, freqEnd: 500, vol: 0.2 }); },
-  levelup: (a, d, t) => { [60, 64, 67, 72].forEach((m, i) => a.tone(d, t + i * 0.08, 0.5, { type: 'triangle', freq: 440 * Math.pow(2, (m - 57) / 12), vol: 0.25 })); },
-  xp: (a, d, t, p) => a.tone(d, t, 0.15, { freq: 1200 * p, freqEnd: 1600 * p, vol: 0.12 }),
-  door_open: (a, d, t) => { a.noiseBurst(d, t, 0.25, { type: 'lowpass', freq: 700, vol: 0.5 }); a.tone(d, t, 0.2, { type: 'triangle', freq: 180, freqEnd: 220, vol: 0.3 }); },
-  door_close: (a, d, t) => { a.noiseBurst(d, t, 0.15, { type: 'lowpass', freq: 600, vol: 0.6 }); a.tone(d, t, 0.12, { type: 'triangle', freq: 150, vol: 0.4 }); },
-  chest_open: (a, d, t) => { a.tone(d, t, 0.4, { type: 'sawtooth', freq: 180, freqEnd: 260, vol: 0.15, filter: 800 }); a.noiseBurst(d, t, 0.3, { type: 'lowpass', freq: 500, vol: 0.3 }); },
-  chest_close: (a, d, t) => { a.noiseBurst(d, t, 0.15, { type: 'lowpass', freq: 500, vol: 0.6 }); },
-  fizz: (a, d, t) => a.noiseBurst(d, t, 0.5, { type: 'highpass', freq: 3000, vol: 0.5, freqEnd: 6000 }),
-  splash: (a, d, t) => a.noiseBurst(d, t, 0.5, { type: 'bandpass', freq: 1200, q: 0.5, vol: 0.6, freqEnd: 400 }),
-  swim: (a, d, t) => a.noiseBurst(d, t, 0.3, { type: 'bandpass', freq: 900, q: 0.7, vol: 0.4 }),
-  glass: (a, d, t) => SOUNDS.mat_glass(a, d, t, 1),
-  item_break: (a, d, t) => { a.noiseBurst(d, t, 0.2, { freq: 2500, q: 2, vol: 0.5 }); a.tone(d, t, 0.2, { freq: 900, freqEnd: 500, vol: 0.2 }); },
-  portal: (a, d, t) => a.tone(d, t, 3, { type: 'sawtooth', freq: 60, freqEnd: 90, vol: 0.2, filter: 400, vibrato: 10, vibRate: 2, attack: 0.5 }),
-  portal_travel: (a, d, t) => { a.tone(d, t, 4, { type: 'sawtooth', freq: 80, freqEnd: 400, vol: 0.3, filter: 1200, vibrato: 20, vibRate: 3, attack: 1 }); a.noiseBurst(d, t, 3, { type: 'bandpass', freq: 500, q: 0.5, vol: 0.3, freqEnd: 3000, attack: 1 }); },
-  end_portal: (a, d, t) => { a.tone(d, t, 3, { freq: 110, freqEnd: 55, vol: 0.5, attack: 0.05 }); a.noiseBurst(d, t, 2, { type: 'lowpass', freq: 800, vol: 0.6, freqEnd: 100 }); [45, 52, 57, 64].forEach((m, i) => a.tone(d, t + i * 0.15, 3, { type: 'triangle', freq: 440 * Math.pow(2, (m - 69) / 12), vol: 0.15 })); },
-  eye_place: (a, d, t) => { a.tone(d, t, 0.6, { freq: 600, freqEnd: 900, vol: 0.2 }); a.noiseBurst(d, t, 0.2, { freq: 2000, q: 3, vol: 0.3 }); },
-  milk: (a, d, t) => a.noiseBurst(d, t, 0.4, { freq: 800, q: 1, vol: 0.4 }),
-  shear: (a, d, t) => { a.noiseBurst(d, t, 0.08, { freq: 4000, q: 2, vol: 0.5 }); a.noiseBurst(d, t + 0.1, 0.08, { freq: 4000, q: 2, vol: 0.5 }); },
-  fire: (a, d, t) => { for (let i = 0; i < 5; i++) a.noiseBurst(d, t + Math.random() * 0.6, 0.03, { freq: 3000 + Math.random() * 2000, q: 2, vol: 0.2 }); },
-  ignite: (a, d, t) => { a.noiseBurst(d, t, 0.15, { freq: 3500, q: 3, vol: 0.6 }); a.noiseBurst(d, t + 0.05, 0.4, { type: 'lowpass', freq: 1500, vol: 0.4 }); },
-  dragon_growl: (a, d, t, p) => { a.tone(d, t, 1.6, { type: 'sawtooth', freq: 70 * p, freqEnd: 55 * p, vol: 0.6, filter: 500, vibrato: 6, vibRate: 9, attack: 0.2 }); a.noiseBurst(d, t, 1.2, { type: 'lowpass', freq: 500, vol: 0.4, attack: 0.3 }); },
-  dragon_flap: (a, d, t) => a.noiseBurst(d, t, 0.5, { type: 'lowpass', freq: 350, vol: 0.7, attack: 0.1 }),
-  dragon_hurt: (a, d, t, p) => a.tone(d, t, 0.6, { type: 'sawtooth', freq: 160 * p, freqEnd: 90 * p, vol: 0.6, filter: 900, vibrato: 12, vibRate: 15 }),
-  dragon_shoot: (a, d, t) => { a.noiseBurst(d, t, 0.6, { type: 'bandpass', freq: 700, q: 0.7, vol: 0.7, freqEnd: 250 }); },
-  dragon_breath: (a, d, t) => a.noiseBurst(d, t, 1.5, { type: 'bandpass', freq: 900, q: 0.5, vol: 0.6, attack: 0.2 }),
-  dragon_death: (a, d, t) => {
-    a.tone(d, t, 8, { type: 'sawtooth', freq: 60, freqEnd: 300, vol: 0.5, filter: 1200, vibrato: 10, vibRate: 5, attack: 0.5 });
-    a.noiseBurst(d, t, 8, { type: 'lowpass', freq: 400, vol: 0.5, freqEnd: 2000, attack: 1 });
-  },
-  toast: (a, d, t) => { a.tone(d, t, 0.25, { type: 'triangle', freq: 880, vol: 0.2 }); a.tone(d, t + 0.12, 0.35, { type: 'triangle', freq: 1320, vol: 0.2 }); },
-  challenge: (a, d, t) => { [67, 71, 74, 79, 83].forEach((m, i) => a.tone(d, t + i * 0.1, 0.8, { type: 'triangle', freq: 440 * Math.pow(2, (m - 69) / 12), vol: 0.2 })); },
-  anvil: (a, d, t) => { a.tone(d, t, 0.5, { freq: 700, vol: 0.3 }); a.tone(d, t, 0.5, { freq: 1100, vol: 0.2 }); },
-  enchant: (a, d, t) => { for (let i = 0; i < 6; i++) a.tone(d, t + i * 0.07, 0.4, { freq: 800 + Math.random() * 1200, vol: 0.1 }); },
-  brew: (a, d, t) => { for (let i = 0; i < 4; i++) a.tone(d, t + i * 0.1, 0.15, { freq: 400 + i * 100, freqEnd: 700, vol: 0.12 }); },
-  thunder: (a, d, t) => { a.noiseBurst(d, t, 3, { type: 'lowpass', freq: 400, vol: 1, freqEnd: 40, attack: 0.05 }); },
+// ---------- composition ----------
+const MODES = {
+  major: [0, 2, 4, 5, 7, 9, 11],
+  lydian: [0, 2, 4, 6, 7, 9, 11],
+  dorian: [0, 2, 3, 5, 7, 9, 10],
+  minor: [0, 2, 3, 5, 7, 8, 10],
+  phrygian: [0, 1, 3, 5, 7, 8, 10],
 };
+const PROGS = {
+  major: [[0, 4, 5, 3], [0, 5, 3, 4], [3, 0, 4, 5], [0, 3, 0, 4], [5, 3, 0, 4], [0, 2, 3, 3], [3, 4, 2, 5]],
+  minor: [[0, 5, 2, 6], [0, 3, 4, 0], [0, 6, 5, 6], [0, 5, 3, 4], [0, 3, 5, 4]],
+};
+
+export function compose(dim) {
+  const R = Math.random;
+  const pick = (a) => a[Math.floor(R() * a.length)];
+  let mode, root, bpm, bars, padChance, melodyChance;
+  if (dim === 'nether') { mode = pick(['phrygian', 'minor']); root = 45 + Math.floor(R() * 4); bpm = 52 + R() * 10; padChance = 0.9; melodyChance = 0.5; }
+  else if (dim === 'end') { mode = pick(['minor', 'dorian']); root = 47 + Math.floor(R() * 4); bpm = 46 + R() * 8; padChance = 1; melodyChance = 0.4; }
+  else if (dim === 'credits') { mode = 'major'; root = 50; bpm = 68; padChance = 1; melodyChance = 1; }
+  else { mode = pick(['major', 'major', 'lydian', 'dorian', 'minor']); root = 48 + Math.floor(R() * 7); bpm = 60 + R() * 18; padChance = 0.3; melodyChance = 0.85; }
+  const sc = MODES[mode];
+  const minorish = mode === 'minor' || mode === 'dorian' || mode === 'phrygian';
+  const prog = pick(minorish ? PROGS.minor : PROGS.major);
+  const beat = 60 / bpm;
+  const reps = dim === 'credits' ? 6 : 3 + Math.floor(R() * 2);
+  bars = prog.length * reps;
+  const deg = (d) => root + sc[((d % 7) + 7) % 7] + 12 * Math.floor(d / 7);
+  const notes = [], pads = [];
+  const hum = () => (R() - 0.5) * 0.03;
+  // motif mélodique (rythme + contour) réutilisé d'une mesure à l'autre
+  const rhythms = [[0, 1.5, 2, 3], [0, 2, 3], [0, 1, 2, 3.5], [0, 3], [1, 2, 2.5, 3], [0, 0.5, 2]];
+  const motif = [pick(rhythms), pick(rhythms)];
+  const pattern = pick(['arp', 'arp', 'block', 'sparse']);
+  let mel = 7 + 2 + Math.floor(R() * 3);
+  for (let b = 0; b < bars; b++) {
+    const chord = prog[b % prog.length];
+    const t = b * 4 * beat;
+    const ch = [chord, chord + 2, chord + 4];
+    const bass = deg(chord) - 12;
+    const lv = 0.32;
+    // main gauche
+    if (pattern === 'arp') {
+      [[0, bass], [1, deg(chord + 4) - 12], [2, deg(chord + 2)], [3, deg(chord + 4) - 12]].forEach(([bt, m], i) => notes.push({ t: t + bt * beat + hum(), m, v: lv * (i === 0 ? 1 : 0.7) }));
+    } else if (pattern === 'block') {
+      notes.push({ t: t + hum(), m: bass, v: lv });
+      notes.push({ t: t + hum(), m: deg(chord + 4) - 12, v: lv * 0.7 });
+      notes.push({ t: t + 2 * beat + hum(), m: deg(chord + 2), v: lv * 0.6 });
+    } else {
+      notes.push({ t: t + hum(), m: bass, v: lv });
+      if (b % 2) notes.push({ t: t + 2 * beat + hum(), m: deg(chord + 2), v: lv * 0.6 });
+    }
+    // nappe
+    if (R() < padChance && b % 2 === 0) pads.push({ t, d: 8 * beat, ms: ch.map((d) => deg(d)), v: dim === 'overworld' ? 0.18 : 0.26 });
+    // main droite : entre après la première répétition
+    const playMel = b >= prog.length && R() < melodyChance;
+    if (playMel) {
+      const rh = motif[b % 2];
+      rh.forEach((bt, i) => {
+        if (R() < 0.15) return;
+        mel += pick([-2, -1, -1, 0, 1, 1, 2]);
+        mel = Math.max(7, Math.min(16, mel));
+        // temps forts : on se pose sur une note de l'accord
+        if (bt === 0 || bt === 2) {
+          let best = mel, bd = 99;
+          for (const c of ch) for (const o of [7, 14]) { const cand = c + o; if (Math.abs(cand - mel) < bd) { bd = Math.abs(cand - mel); best = cand; } }
+          mel = best;
+        }
+        notes.push({ t: t + bt * beat + hum(), m: deg(mel), v: 0.45 * (i === 0 ? 1 : 0.85) });
+      });
+    }
+  }
+  // accord final
+  const endT = bars * 4 * beat;
+  [0, 4, 7 + 2].forEach((d, i) => notes.push({ t: endT + i * 0.08, m: deg(prog[0] + d) - (i === 0 ? 12 : 0), v: 0.35 }));
+  return { notes, pads };
+}

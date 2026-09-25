@@ -138,9 +138,11 @@ export class World {
     }
     // déchargement
     if (this.tickCount % 20 === 0) {
-      const lim = radius + 4;
+      // marge réduite pour les grandes distances (mémoire)
+      const lim = radius + (radius > 12 ? 2 : 4);
       for (const c of [...this.chunks.values()]) {
-        if (Math.abs(c.cx - pcx) > lim || Math.abs(c.cz - pcz) > lim) this.unloadChunk(c);
+        const dx = c.cx - pcx, dz = c.cz - pcz;
+        if (Math.abs(dx) > lim || Math.abs(dz) > lim || dx * dx + dz * dz > (lim + 1) * (lim + 1)) this.unloadChunk(c);
       }
     }
     return generated;

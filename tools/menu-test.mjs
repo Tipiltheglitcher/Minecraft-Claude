@@ -66,6 +66,40 @@ await step('inventaire au clavier (E)', async () => {
   await page.keyboard.press('KeyE');
   await page.waitForTimeout(300);
 });
+await step('changer une touche (Avancer -> I) et s\'en servir', async () => {
+  await page.evaluate(() => window.game.ui.openPause());
+  await page.waitForTimeout(200);
+  await click('Options');
+  await click('Commandes');
+  await shot('m_controls');
+  const row = page.locator('.keyrow', { hasText: 'Avancer' }).first();
+  await row.locator('button').click();
+  await page.waitForTimeout(200);
+  await page.keyboard.press('KeyI');
+  await page.waitForTimeout(200);
+  const k = await page.evaluate(() => window.game.settings.keys.forward);
+  if (k !== 'KeyI') throw new Error('touche=' + k);
+  await click('Terminé');
+  await click('Reprendre la partie');
+  const z0 = await page.evaluate(() => window.game.player.z);
+  await page.keyboard.down('KeyI');
+  await page.waitForTimeout(1500);
+  await page.keyboard.up('KeyI');
+  const z1 = await page.evaluate(() => window.game.player.z);
+  if (Math.abs(z1 - z0) < 0.3 && (await page.evaluate(() => Math.abs(window.game.player.x - window.game.player.prevX))) < 0.01) {
+    const moved = await page.evaluate(() => window.game.player.walkDist);
+    if (!moved) throw new Error('le joueur ne bouge pas');
+  }
+  await page.evaluate(() => { const g = window.game; g.settings.keys.forward = 'KeyW'; g.saveSettings(); });
+});
+await step('onglets des options (vidéo, shaders, son, jeu)', async () => {
+  await page.evaluate(() => window.game.ui.openPause());
+  await page.waitForTimeout(200);
+  await click('Options');
+  for (const t of ['Shaders', 'Son', 'Jeu', 'Vidéo']) { await click(t); await shot('m_opt_' + t); }
+  await click('Terminé');
+  await click('Reprendre la partie');
+});
 await step('sauvegarder et quitter puis recharger', async () => {
   await page.evaluate(() => window.game.ui.openPause());
   await page.waitForTimeout(200);

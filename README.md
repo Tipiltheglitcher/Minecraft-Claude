@@ -26,8 +26,11 @@ Le jeu se **termine** comme l'original : on survit, on part dans le Nether cherc
 | Q / Ctrl+Q | Jeter un objet / la pile |
 | T ou / | Chat et commandes (`/help`) |
 | L | Progrès |
+| C | Zoom |
 | F1 / F2 / F3 / F5 | Masquer l'interface / capture / débogage / vue à la 3e personne |
 | Échap | Pause, options, guide |
+
+**Toutes les touches se changent** dans *Options → Commandes*, y compris les boutons de la souris (clic, molette, boutons latéraux). Les conflits s'affichent en rouge. S'accroupir et sprinter peuvent passer en mode « basculer ».
 
 Dans l'inventaire : Maj+clic pour un déplacement rapide, clic droit pour prendre la moitié ou déposer un par un, glisser pour répartir, double-clic pour rassembler, touches 1-9 pour échanger avec la barre d'action. Le **livre de recettes** (à gauche) liste toutes les recettes et les place dans la grille d'un clic.
 
@@ -65,13 +68,21 @@ Si le navigateur refuse le verrouillage de la souris (page intégrée dans une a
 - Le **Nether** (portails d'obsidienne de 2×3 à 21×21, correspondance des coordonnées ×8), avec forteresses, générateurs de Blazes, pierre lumineuse, quartz, sable des âmes, lave.
 - **L'End** : île principale, 10 piliers d'obsidienne avec cristaux (dont deux en cage), plateforme d'arrivée, portail de sortie, œuf de dragon, îles extérieures.
 
+**Graphismes : mode shader** (*Options → Shaders*, préréglages Bas / Moyen / Élevé / Ultra)
+- Rendu HDR avec correction tonale, adaptation de l'œil (on voit mieux après quelques secondes dans le noir).
+- Ombres dynamiques du soleil et de la lune (carte d'ombres déformée pour plus de détails près du joueur, filtrage doux), créatures comprises.
+- Eau réaliste : vagues, réflexions en espace écran, réfraction, absorption selon la profondeur, reflets du soleil.
+- Feuillage, herbes et cultures qui ondulent au vent ; lumières (pierre lumineuse, lave, torches) avec halo (bloom).
+- Ciel avec diffusion atmosphérique, nuages volumétriques éclairés, rayons de soleil ; brume et lumière des torches chaude.
+- Réglages : portée et qualité des ombres, réflexions, ondulation, bloom, rayons, vignette, exposition, saturation.
+
 **Méta**
 - Mondes multiples sauvegardés dans le navigateur (IndexedDB) : blocs modifiés, coffres, fours, inventaire, progression, état de l'End.
 - Modes survie, créatif (inventaire créatif avec recherche et œufs d'apparition) et spectateur ; 4 difficultés.
 - 38 progrès qui guident jusqu'à la fin, guide de survie intégré, épilogue original et générique.
 - Commandes : `/help`, `/gamemode`, `/give`, `/tp`, `/time`, `/weather`, `/locate fort|forteresse|village`, `/summon`, `/effect`, `/enchant`, `/xp`, `/difficulty`, `/gamerule`, `/spawnpoint`, `/home`, `/top`, `/seed`…
-- Options : distance d'affichage, champ de vision, sensibilité, luminosité, volumes, échelle de l'interface, résolution, particules, feuillage, éclairage lissé, nuages, balancement de la vue…
-- Audio 100 % procédural (Web Audio) : bruitages spatialisés des blocs, créatures, explosions, et musique générative au piano.
+- Options en onglets (Vidéo, Shaders, Son, Commandes, Jeu) : distance d'affichage jusqu'à 32 chunks, champ de vision, luminosité, échelle de l'interface, résolution, particules, feuillage, éclairage lissé, nuages, volumes séparés (musique, effets, ambiance), sensibilité, touches, règles du jeu…
+- Audio 100 % procédural : chaque bruitage est synthétisé au lancement en plusieurs variantes (grains pour le gravier, l'herbe, le sable et la neige ; synthèse modale pour le bois, la pierre, le métal et le verre ; voix à formants pour les créatures ; corde pincée pour l'arc). Son spatialisé, réverbération dans les grottes, sons étouffés sous l'eau, ambiances de pluie, du Nether et de l'End, compresseur. Musique générative au piano (timbre additif réaliste) avec progressions d'accords, mélodies et nappes.
 
 ## Comment finir le jeu
 
@@ -95,9 +106,11 @@ src/
   data/      identifiants, blocs, objets, recettes
   world/     chunks, monde, lumière, fluides et comportements des blocs, explosions
   world/gen/ générateurs (Surface, Nether, End), arbres et minerais, structures
-  gfx/       textures procédurales, mesher, renderer WebGL2, shaders, ciel, particules, modèles d'entités
+  gfx/       textures procédurales, mesher, renderer WebGL2, shaders, ciel, particules, modèles d'entités,
+             mode shader (fancy.js : ombres, eau, bloom, post-traitement)
   entity/    entités, créatures et IA, projectiles, dragon, apparition, recherche de chemin
-  game/      boucle de jeu, entrées, interactions, portails, audio, sauvegarde, progrès, enchantements, commandes
+  game/      boucle de jeu, entrées et touches configurables, interactions, portails, audio (sfx.js : synthèse
+             des bruitages), sauvegarde, progrès, enchantements, commandes
   ui/        interface (HUD, inventaires, menus), icônes, épilogue
 tools/       build (fichier unique), tests automatisés dans Chromium
 ```
@@ -110,7 +123,8 @@ Les tests lancent le jeu dans Chromium sans interface (Playwright) :
 
 - `node tools/logic-test.mjs` rejoue toute la progression (artisanat, four, minage, portails, yeux de l'Ender, dragon, générique, sauvegarde) ;
 - `node tools/feature-test.mjs` vérifie les autres mécaniques (lit, portes, TNT, creeper, squelette, zombie, seaux, agriculture, apparitions, enchantement, commerce, alambic, mort) ;
-- `node tools/menu-test.mjs` parcourt les menus avec de vrais clics ;
+- `node tools/menu-test.mjs` parcourt les menus avec de vrais clics (dont le changement d'une touche) ;
+- `node tools/shader-test.mjs` synthétise tous les sons et fait des captures du mode shader (jour, coucher de soleil, nuit, eau, ombres) ;
 - `node tools/smoke-test.mjs <scénario>` produit des captures (`tour`, `mobs`, `ui`, `nether`, `end`, `stronghold`, `village`, `night`, `items`…).
 
 ## Avertissement

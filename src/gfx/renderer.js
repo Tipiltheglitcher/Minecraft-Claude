@@ -9,6 +9,7 @@ import { ST_LIT } from '../world/chunk.js';
 import { BLOCKS, selectionBoxes, RENDER, R_CUBE, R_CROSS, R_CROP } from '../data/blocks.js';
 import { ITEMS } from '../data/items.js';
 import { B } from '../data/ids.js';
+import { Fancy } from './fancy.js';
 
 export class Renderer {
   constructor(canvas, game) {
@@ -51,6 +52,19 @@ export class Renderer {
     setupVertexAttribs(gl);
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.indexBuf);
     gl.bindVertexArray(null);
+    // géométrie des entités (conservée pour la passe d'ombres)
+    this.ent = new GeoBuffer(8192);
+    this.entVbo = gl.createBuffer();
+    this.entVao = gl.createVertexArray();
+    gl.bindVertexArray(this.entVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.entVbo);
+    setupVertexAttribs(gl);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.indexBuf);
+    gl.bindVertexArray(null);
+    this.entRanges = [];
+    this.W = this.world;
+    this.fancy = null;
+    this.fancyError = null;
 
     this.lineVbo = gl.createBuffer();
     this.lineVao = gl.createVertexArray();
@@ -203,7 +217,8 @@ export class Renderer {
     if (p.sprinting) fov *= 1.12;
     if (p.flying && p.sprinting) fov *= 1.05;
     if (p.usingItem && p.useItemId === 256 + 17) fov *= 1 - Math.min(1, p.useTicks / 20) * 0.15; // arc
-    this.fovCurrent = M.lerp(this.fovCurrent || fov, fov, 0.2);
+    if (game.zooming) fov = s.fov * 0.25;
+    this.fovCurrent = M.lerp(this.fovCurrent || fov, fov, game.zooming ? 0.3 : 0.2);
     const aspect = this.canvas.width / this.canvas.height;
     M.perspective(this.proj, this.fovCurrent * M.DEG, aspect, 0.05, 1000);
     const v = this.view;
@@ -237,13 +252,30 @@ export class Renderer {
   }
 
   // ---------- Rendu principal ----------
+  // Mode shader disponible et activé ?
+  useFancy() {
+    const s = this.game.settings;
+    if (!s.shaders || this.fancyError) return false;
+    if (!this.fancy) {
+      try {
+        this.fancy = new Fancy(this);
+      } catch (e) {
+        console.warn(e);
+        this.fancyError = e.message;
+        this.game.ui?.chat?.('Mode shader indisponible : ' + e.message, '#f55');
+        return false;
+      }
+    }
+    return true;
+  }
+
   render(pt, dt) {
     const gl = this.gl;
     const game = this.game;
     const world = game.world;
     this.time += dt;
+    this.pt = pt;
     this.resize();
-    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     this.setupCamera(pt);
     const env = game.sky.environment(world, this.cam, pt);
     this.env = env;
@@ -251,20 +283,41 @@ export class Renderer {
     meshSettings.fancyLeaves = game.settings.fancyLeaves;
     meshSettings.smooth = game.settings.smoothLighting;
     this.updateMeshes(world, 5);
+    const fancy = this.useFancy() ? this.fancy : null;
+    const cam = this.cam;
+    this.buildEntities(pt);
 
-    gl.clearColor(env.fog[0], env.fog[1], env.fog[2], 1);
+    if (fancy) {
+      fancy.computeLight(env, game);
+      fancy.ensureTargets(this.canvas.width, this.canvas.height);
+      if (game.settings.shaderShadows && env.dim !== 1) fancy.shadowPass(world, cam);
+      else fancy.lastShadow = -1;
+      fancy.bindScene();
+      this.W = fancy.world;
+    } else {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+      this.W = this.world;
+    }
+    const W = this.W;
+    gl.useProgram(W.program);
+    if (fancy) fancy.setWorldUniforms(W, env, cam);
+    const fog = fancy ? fancy.fogLin : env.fog;
+    gl.clearColor(fog[0], fog[1], fog[2], 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     // ciel
-    if (!env.underFluid) this.drawSky(env, R);
+    if (!env.underFluid) {
+      if (fancy) fancy.drawSky(env, R, cam);
+      else this.drawSky(env, R);
+    }
 
     // uniformes communs
-    const W = this.world;
     gl.useProgram(W.program);
     gl.uniformMatrix4fv(W.u.u_viewProj, false, this.viewProj);
     gl.uniform1f(W.u.u_time, this.time);
     gl.uniform1f(W.u.u_sky, env.skyLight);
     gl.uniform3fv(W.u.u_skyTint, env.skyTint);
-    gl.uniform3fv(W.u.u_fogColor, env.fog);
+    if (!fancy) gl.uniform3fv(W.u.u_fogColor, env.fog);
     gl.uniform2f(W.u.u_fog, env.fogStart, env.fogEnd);
     gl.uniform1f(W.u.u_ambient, env.ambient);
     gl.uniform1f(W.u.u_gamma, game.settings.brightness);
@@ -279,7 +332,6 @@ export class Renderer {
     gl.uniform1f(W.u.u_alphaTest, 0.5);
 
     // passe opaque
-    const cam = this.cam;
     const visible = [];
     const pcx = Math.floor(cam.x) >> 4, pcz = Math.floor(cam.z) >> 4;
     const RD = game.settings.renderDistance;
@@ -306,7 +358,12 @@ export class Renderer {
     this.stats.drawn = drawn;
 
     // entités
-    this.drawEntities(pt);
+    this.drawEntities();
+    // copie de la scène opaque pour l'eau (réfraction / réflexions)
+    if (fancy) {
+      fancy.copyScene();
+      gl.useProgram(W.program);
+    }
     // particules
     if (game.particles) this.drawParticles(pt);
 
@@ -320,6 +377,7 @@ export class Renderer {
     gl.uniform1f(W.u.u_uvScale, 1 / 16);
     gl.uniform1f(W.u.u_alphaTest, 0.01);
     gl.uniform4f(W.u.u_overlay, 0, 0, 0, 0);
+    if (fancy) gl.uniform1f(W.u.u_waterPass, 1);
     gl.disable(gl.CULL_FACE);
     for (let i = visible.length - 1; i >= 0; i--) {
       const v = visible[i];
@@ -328,6 +386,7 @@ export class Renderer {
       gl.bindVertexArray(v.m.trans.vao);
       gl.drawElements(gl.TRIANGLES, (v.m.trans.count / 4) * 6, gl.UNSIGNED_INT, 0);
     }
+    if (fancy) gl.uniform1f(W.u.u_waterPass, 0);
     gl.enable(gl.CULL_FACE);
     gl.depthMask(true);
     // pluie / neige
@@ -339,6 +398,7 @@ export class Renderer {
     // main
     if (game.cameraMode === 0 && !game.hideHud) this.drawHand(pt, env);
     gl.bindVertexArray(null);
+    if (fancy) fancy.post(env, cam, dt);
   }
 
   drawSky(env, R) {
@@ -367,11 +427,12 @@ export class Renderer {
   }
 
   // ---------- Entités ----------
-  drawEntities(pt) {
+  // Construit la géométrie de toutes les entités visibles (réutilisée par la passe d'ombres)
+  buildEntities(pt) {
     const gl = this.gl;
     const game = this.game;
     const world = game.world;
-    const buf = this.dyn;
+    const buf = this.ent;
     buf.reset();
     const ranges = [];
     const cam = this.cam;
@@ -383,7 +444,9 @@ export class Renderer {
       const dx = ex - cam.x, dy = ey - cam.y, dz = ez - cam.z;
       if (dx * dx + dy * dy + dz * dz > R2) continue;
       const r = Math.max(e.width, e.height) + (e.renderRadius || 0);
-      if (!M.boxInFrustum(this.frustum, dx - r, dy - r, dz - r, dx + r, dy + r * 2, dz + r)) continue;
+      const inView = M.boxInFrustum(this.frustum, dx - r, dy - r, dz - r, dx + r, dy + r * 2, dz + r);
+      // hors champ : gardée seulement si proche (son ombre peut être visible)
+      if (!inView && dx * dx + dz * dz > 32 * 32) continue;
       const bx = Math.floor(ex), by = Math.floor(ey + e.height * 0.5), bz = Math.floor(ez);
       const sky = world.getSky(bx, by, bz) * 17, bl = world.getBlockLight(bx, by, bz) * 17;
       const start = buf.n;
@@ -396,39 +459,56 @@ export class Renderer {
       }
       if (!kind || buf.n === start) { buf.n = start; e._heldId = 0; continue; }
       const overlay = e.overlay ? e.overlay(pt) : null;
-      ranges.push({ start, count: buf.n - start, kind, ox: dx, oy: dy, oz: dz, overlay, alpha: e.renderAlpha });
+      ranges.push({ start, count: buf.n - start, kind, ox: dx, oy: dy, oz: dz, overlay, alpha: e.renderAlpha, inView });
       if (e._heldId) {
         const s2 = buf.n;
         this.renderItem(buf, e._heldMat, e._heldId, sky, e.fullbright ? 255 : bl, 0.5);
-        if (buf.n > s2) ranges.push({ start: s2, count: buf.n - s2, kind: 'block', ox: dx, oy: dy, oz: dz, overlay });
+        if (buf.n > s2) ranges.push({ start: s2, count: buf.n - s2, kind: 'block', ox: dx, oy: dy, oz: dz, overlay, inView });
         e._heldId = 0;
       }
     }
+    this.entRanges = ranges;
     if (!ranges.length) return;
-    this.flushDyn();
-    const W = this.world;
-    gl.useProgram(W.program);
-    gl.uniform1f(W.u.u_posScale, 1 / 256);
-    gl.uniform1f(W.u.u_alphaTest, 0.1);
-    gl.bindVertexArray(this.dynVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.entVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, buf.u8.subarray(0, buf.n * 20), gl.STREAM_DRAW);
+    this.ensureIndices(buf.n / 4 + 1);
+  }
+
+  // Dessine les entités avec le programme donné (rendu normal ou passe d'ombres)
+  drawEntityRanges(P, shadow = false) {
+    const ranges = this.entRanges;
+    if (!ranges.length) return;
+    const gl = this.gl;
+    gl.uniform1f(P.u.u_posScale, 1 / 256);
+    gl.uniform1f(P.u.u_alphaTest, shadow ? 0.5 : 0.1);
+    gl.bindVertexArray(this.entVao);
     let bound = null;
     for (const r of ranges) {
+      if (shadow ? r.alpha : !r.inView) continue;
       const skin = r.kind === 'skin';
       if (bound !== r.kind) {
         gl.bindTexture(gl.TEXTURE_2D_ARRAY, skin ? this.skinTex : this.blockTex);
-        gl.uniform1f(W.u.u_uvScale, skin ? 1 / SKIN_SIZE : 1 / 16);
+        gl.uniform1f(P.u.u_uvScale, skin ? 1 / SKIN_SIZE : 1 / 16);
         bound = r.kind;
       }
-      gl.uniform3f(W.u.u_offset, r.ox, r.oy, r.oz);
-      const ov = r.overlay;
-      if (ov) gl.uniform4f(W.u.u_overlay, ov[0], ov[1], ov[2], ov[3]);
-      else gl.uniform4f(W.u.u_overlay, 0, 0, 0, 0);
-      if (r.alpha) { gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.uniform1f(W.u.u_alphaMul, r.alpha); }
+      gl.uniform3f(P.u.u_offset, r.ox, r.oy, r.oz);
+      if (!shadow) {
+        const ov = r.overlay;
+        if (ov) gl.uniform4f(P.u.u_overlay, ov[0], ov[1], ov[2], ov[3]);
+        else gl.uniform4f(P.u.u_overlay, 0, 0, 0, 0);
+        if (r.alpha) { gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.uniform1f(P.u.u_alphaMul, r.alpha); }
+      }
       gl.drawElements(gl.TRIANGLES, (r.count / 4) * 6, gl.UNSIGNED_INT, (r.start / 4) * 6 * 4);
-      if (r.alpha) { gl.disable(gl.BLEND); gl.uniform1f(W.u.u_alphaMul, 1); }
+      if (!shadow && r.alpha) { gl.disable(gl.BLEND); gl.uniform1f(P.u.u_alphaMul, 1); }
     }
-    gl.uniform4f(W.u.u_overlay, 0, 0, 0, 0);
+    if (!shadow) gl.uniform4f(P.u.u_overlay, 0, 0, 0, 0);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.blockTex);
+  }
+
+  drawEntities() {
+    const W = this.W;
+    this.gl.useProgram(W.program);
+    this.drawEntityRanges(W, false);
   }
 
   flushDyn() {
@@ -507,7 +587,7 @@ export class Renderer {
     ps.build(buf, pt, cam, [rx, 0, rz], [ux, uy, uz]);
     if (!buf.n) return;
     this.flushDyn();
-    const W = this.world;
+    const W = this.W;
     gl.useProgram(W.program);
     gl.uniform3f(W.u.u_offset, 0, 0, 0);
     gl.uniform1f(W.u.u_posScale, 1 / 256);
@@ -573,7 +653,7 @@ export class Renderer {
       }
     if (!buf.n) return;
     this.flushDyn();
-    const W = this.world;
+    const W = this.W;
     gl.useProgram(W.program);
     gl.uniform3f(W.u.u_offset, 0, 0, 0);
     gl.uniform1f(W.u.u_posScale, 1 / 256);
@@ -631,7 +711,7 @@ export class Renderer {
         renderBlockCube(buf, mat, [layer, layer, layer, layer, layer, layer], 255, 255, 1, [255, 255, 255], true);
       }
       this.flushDyn();
-      const W = this.world;
+      const W = this.W;
       gl.useProgram(W.program);
       gl.uniform3f(W.u.u_offset, t.x - this.cam.x, t.y - this.cam.y, t.z - this.cam.z);
       gl.uniform1f(W.u.u_posScale, 1 / 256);
@@ -711,7 +791,7 @@ export class Renderer {
     const proj = M.mat4();
     M.perspective(proj, 70 * M.DEG, this.canvas.width / this.canvas.height, 0.01, 10);
     gl.clear(gl.DEPTH_BUFFER_BIT);
-    const W = this.world;
+    const W = this.W;
     gl.useProgram(W.program);
     gl.uniformMatrix4fv(W.u.u_viewProj, false, proj);
     gl.uniform3f(W.u.u_offset, 0, 0, 0);
@@ -719,6 +799,7 @@ export class Renderer {
     gl.uniform1f(W.u.u_uvScale, kind === 'skin' ? 1 / SKIN_SIZE : 1 / 16);
     gl.uniform1f(W.u.u_alphaTest, 0.1);
     gl.uniform2f(W.u.u_fog, 1000, 2000);
+    if (W !== this.world) { gl.uniform1f(W.u.u_shadowOn, 0); gl.uniform1f(W.u.u_haze, 0); }
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, kind === 'skin' ? this.skinTex : this.blockTex);
     gl.disable(gl.CULL_FACE);
     gl.bindVertexArray(this.dynVao);

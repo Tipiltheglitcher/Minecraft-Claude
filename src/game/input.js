@@ -1,4 +1,5 @@
-// Gestion du clavier, de la souris (pointer lock) et du tactile
+// Gestion du clavier, de la souris (pointer lock) et du tactile.
+// Les actions passent par les touches configurables (settings.keys).
 export class Input {
   constructor(game, canvas) {
     this.game = game;
@@ -15,11 +16,44 @@ export class Input {
     this.bind();
   }
 
+  get binds() {
+    return this.game.settings.keys;
+  }
+
+  // Code physique (clavier ou souris) enfoncé / relâché : met à jour l'état des actions
+  press(code, down) {
+    const b = this.binds;
+    if (code === b.attack) { this.mouse.left = down; if (down) this.clicked.left = true; }
+    if (code === b.use) { this.mouse.right = down; if (down) this.clicked.right = true; }
+    if (code === b.pickBlock) { this.mouse.middle = down; if (down) this.clicked.middle = true; }
+    if (down) {
+      if (!this.keys.has(code)) {
+        this.pressed.add(code);
+        this.tickPressed.add(code);
+        const now = performance.now();
+        if (this.lastTap[code] && now - this.lastTap[code] < 300) { this.pressed.add('double_' + code); this.tickPressed.add('double_' + code); }
+        this.lastTap[code] = now;
+      }
+      this.keys.add(code);
+    } else this.keys.delete(code);
+  }
+
+  // État des actions
+  held(action) { return this.keys.has(this.binds[action]); }
+  hit(action) { return this.tickPressed.has(this.binds[action]); }
+  hitFrame(action) { return this.pressed.has(this.binds[action]); }
+  doubleHit(action) { return this.tickPressed.has('double_' + this.binds[action]); }
+
+  releaseAll() {
+    this.keys.clear();
+    this.mouse.left = this.mouse.right = this.mouse.middle = false;
+  }
+
   bind() {
     const c = this.canvas;
     window.addEventListener('keydown', (e) => this.onKey(e, true));
     window.addEventListener('keyup', (e) => this.onKey(e, false));
-    window.addEventListener('blur', () => { this.keys.clear(); this.mouse.left = this.mouse.right = false; });
+    window.addEventListener('blur', () => this.releaseAll());
     c.addEventListener('mousedown', (e) => {
       this.game.audio.init();
       if (this.game.ui.screenOpen()) return;
@@ -28,14 +62,11 @@ export class Input {
         if (!document.pointerLockElement && this.game.state === 'playing') this.dragLook = true;
         if (!this.dragLook) return;
       }
-      if (e.button === 0) { this.mouse.left = true; this.clicked.left = true; }
-      if (e.button === 2) { this.mouse.right = true; this.clicked.right = true; }
-      if (e.button === 1) { this.mouse.middle = true; this.clicked.middle = true; e.preventDefault(); }
+      if (e.button === 1) e.preventDefault();
+      this.press('Mouse' + e.button, true);
     });
     window.addEventListener('mouseup', (e) => {
-      if (e.button === 0) this.mouse.left = false;
-      if (e.button === 2) this.mouse.right = false;
-      if (e.button === 1) this.mouse.middle = false;
+      if (this.keys.has('Mouse' + e.button) || e.button <= 2) this.press('Mouse' + e.button, false);
     });
     window.addEventListener('mousemove', (e) => {
       if (this.locked || (this.dragLook && (e.buttons & 1 || e.buttons & 2) && !this.game.ui.screenOpen())) {
@@ -88,17 +119,10 @@ export class Input {
     if (down) this.game.audio.init();
     if (ui && ui.handleKey(e, down)) return;
     if (this.game.state !== 'playing') return;
-    if (['Space', 'ArrowUp', 'ArrowDown', 'Tab', 'F1', 'F3', 'F5', 'Slash'].includes(code)) e.preventDefault();
-    if (down) {
-      if (!this.keys.has(code)) {
-        this.pressed.add(code);
-        this.tickPressed.add(code);
-        const now = performance.now();
-        if (this.lastTap[code] && now - this.lastTap[code] < 300) { this.pressed.add('double_' + code); this.tickPressed.add('double_' + code); }
-        this.lastTap[code] = now;
-      }
-      this.keys.add(code);
-    } else this.keys.delete(code);
+    const b = this.binds;
+    if (code === 'Tab' || code.startsWith('F') && /^F\d+$/.test(code) || code === b.jump || code === b.command || code === 'Space' || code.startsWith('Arrow')) e.preventDefault();
+    if (down && e.repeat) return;
+    this.press(code, down);
   }
 
   down(code) {
