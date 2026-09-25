@@ -1,0 +1,16 @@
+{
+  "name": "minecraft-js",
+  "version": "1.0.0",
+  "description": "Clone complet de Minecraft en JavaScript/WebGL2 (survie, Nether, End, Ender Dragon)",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "serve": "npx --yes http-server -c-1 -p 8080 .",
+    "test": "node tools/smoke-test.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  },
+  "license": "MIT"
+}

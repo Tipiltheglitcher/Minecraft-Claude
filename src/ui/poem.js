@@ -1,0 +1,42 @@
+// Épilogue original (écrit pour ce projet) et générique de fin
+// 1 = première voix (turquoise), 2 = seconde voix (vert)
+export const END_POEM = [
+  [1, 'Regarde. Le dragon est tombé, et le silence revient sur l\'île.'],
+  [2, 'Je vois le joueur. Il reste immobile devant la fontaine de pierre noire.'],
+  [1, 'Il ne sait pas encore que ce n\'était pas une fin.'],
+  [2, 'Il a commencé avec rien. Des mains vides, une plaine, un soleil carré.'],
+  [1, 'Il a frappé un arbre jusqu\'à ce que l\'arbre lui donne du bois.'],
+  [2, 'Et du bois il a fait une table, et de la table il a fait des outils.'],
+  [1, 'Il a eu peur de la première nuit.'],
+  [2, 'Tout le monde a peur de la première nuit.'],
+  [1, 'Il a creusé dans le noir, torche après torche, pour repousser les ombres.'],
+  [2, 'Il a trouvé le fer, puis le diamant, brillant comme une idée soudaine.'],
+  [1, 'Il a versé l\'eau sur le feu liquide et en a fait une porte.'],
+  [2, 'Il a traversé cette porte vers un monde de braises et de cris.'],
+  [1, 'Là-bas, il a arraché aux créatures de flamme ce qu\'il fallait pour voir.'],
+  [2, 'Des yeux. Il a fabriqué des yeux, et les yeux lui ont montré le chemin.'],
+  [1, 'Sous la terre, il a trouvé la salle oubliée, et le vide qui l\'attendait.'],
+  [2, 'Et dans le vide, il a affronté ce que tout le monde disait invincible.'],
+  [1, 'Pourquoi a-t-il fait tout cela ?'],
+  [2, 'Personne ne le lui a demandé. C\'est peut-être pour cela qu\'il l\'a fait.'],
+  [1, 'Chaque bloc qu\'il a posé était un choix. Chaque choix était à lui.'],
+  [2, 'Le monde n\'était qu\'une graine, un nombre au hasard.'],
+  [1, 'Mais ce qu\'il en a fait, aucun nombre ne pouvait le prévoir.'],
+  [2, 'Faut-il lui dire que le monde continue, derrière le portail ?'],
+  [1, 'Il le sait déjà. Il reste des montagnes qu\'il n\'a pas gravies.'],
+  [2, 'Des villages qu\'il n\'a pas visités. Des maisons qu\'il n\'a pas construites.'],
+  [1, 'Des couchers de soleil qu\'il n\'a pas encore regardés jusqu\'au bout.'],
+  [2, 'Alors laissons-le rentrer chez lui.'],
+  [1, 'Joueur, tu as fini le jeu.'],
+  [2, 'Maintenant, joue.'],
+  [0, ''],
+  [1, 'Réveille-toi.'],
+];
+
+export const CREDITS = [
+  ['Minecraft JS', ['Un clone de Minecraft écrit entièrement en JavaScript et WebGL2', 'Textures, sons, musiques et modèles générés procéduralement']],
+  ['Conception et programmation', ['Claude (Anthropic), à la demande du joueur']],
+  ['Moteur', ['Génération de terrain par bruit simplex', 'Éclairage par propagation (ciel et blocs)', 'Maillage avec occlusion ambiante', 'Physique inspirée de l\'original']],
+  ['Créatures', ['Cochons, vaches, moutons, poulets', 'Zombies, squelettes, creepers, araignées, Endermen', 'Villageois et golems de fer', 'Piglins, Ghasts, Blazes, Wither squelettes, cubes de magma', 'Et l\'Ender Dragon']],
+  ['Remerciements', ['À Minecraft et à ses créateurs, pour l\'inspiration', 'Ce projet est un hommage non officiel, sans aucun élément original de Mojang', 'Et à vous, pour avoir joué jusqu\'au bout']],
+];
