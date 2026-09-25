@@ -28,7 +28,7 @@ Le jeu se **termine** comme l'original : on survit, on part dans le Nether cherc
 | L | Progrès |
 | C | Zoom |
 | F1 / F2 / F3 / F5 | Masquer l'interface / capture / débogage / vue à la 3e personne |
-| Échap | Pause, options, guide |
+| Échap | Pause, options, guide (depuis l'inventaire, un coffre ou le chat : ferme et met en pause) |
 
 **Toutes les touches se changent** dans *Options → Commandes*, y compris les boutons de la souris (clic, molette, boutons latéraux). Les conflits s'affichent en rouge. S'accroupir et sprinter peuvent passer en mode « basculer ».
 
@@ -82,7 +82,7 @@ Si le navigateur refuse le verrouillage de la souris (page intégrée dans une a
 - 38 progrès qui guident jusqu'à la fin, guide de survie intégré, épilogue original et générique.
 - Commandes : `/help`, `/gamemode`, `/give`, `/tp`, `/time`, `/weather`, `/locate fort|forteresse|village`, `/summon`, `/effect`, `/enchant`, `/xp`, `/difficulty`, `/gamerule`, `/spawnpoint`, `/home`, `/top`, `/seed`…
 - Options en onglets (Vidéo, Shaders, Son, Commandes, Jeu) : distance d'affichage jusqu'à 32 chunks, champ de vision, luminosité, échelle de l'interface, résolution, particules, feuillage, éclairage lissé, nuages, volumes séparés (musique, effets, ambiance), sensibilité, touches, règles du jeu…
-- Audio 100 % procédural : chaque bruitage est synthétisé au lancement en plusieurs variantes (grains pour le gravier, l'herbe, le sable et la neige ; synthèse modale pour le bois, la pierre, le métal et le verre ; voix à formants pour les créatures ; corde pincée pour l'arc). Son spatialisé, réverbération dans les grottes, sons étouffés sous l'eau, ambiances de pluie, du Nether et de l'End, compresseur. Musique générative au piano (timbre additif réaliste) avec progressions d'accords, mélodies et nappes.
+- Audio 100 % procédural : chaque bruitage est synthétisé au lancement en plusieurs variantes (grains pour le gravier, l'herbe, le sable et la neige ; synthèse modale pour le bois, la pierre, le métal et le verre ; voix à formants pour les créatures ; corde pincée pour l'arc). Son spatialisé, réverbération dans les grottes, sons étouffés sous l'eau, ambiances de pluie, du Nether et de l'End, compresseur. Musique générative au piano (timbre additif réaliste) avec progressions d'accords, mélodies et nappes : elle joue dès l'écran titre, s'enchaîne en fondu selon l'endroit (Surface, Nether, End) et les pauses entre morceaux se règlent (aucune, courtes, longues comme Minecraft).
 
 ## Comment finir le jeu
 
@@ -124,6 +124,7 @@ Les tests lancent le jeu dans Chromium sans interface (Playwright) :
 - `node tools/logic-test.mjs` rejoue toute la progression (artisanat, four, minage, portails, yeux de l'Ender, dragon, générique, sauvegarde) ;
 - `node tools/feature-test.mjs` vérifie les autres mécaniques (lit, portes, TNT, creeper, squelette, zombie, seaux, agriculture, apparitions, enchantement, commerce, alambic, mort) ;
 - `node tools/menu-test.mjs` parcourt les menus avec de vrais clics (dont le changement d'une touche) ;
+- `node tools/music-test.mjs` vérifie que la musique joue au menu puis s'enchaîne en jeu ;
 - `node tools/shader-test.mjs` synthétise tous les sons et fait des captures du mode shader (jour, coucher de soleil, nuit, eau, ombres) ;
 - `node tools/smoke-test.mjs <scénario>` produit des captures (`tour`, `mobs`, `ui`, `nether`, `end`, `stronghold`, `village`, `night`, `items`…).
 

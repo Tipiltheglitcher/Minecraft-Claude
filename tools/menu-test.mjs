@@ -66,6 +66,28 @@ await step('inventaire au clavier (E)', async () => {
   await page.keyboard.press('KeyE');
   await page.waitForTimeout(300);
 });
+await step('Échap dans l\'inventaire et la table de craft met le jeu en pause', async () => {
+  for (const open of ['KeyE', 'craft']) {
+    if (open === 'KeyE') await page.keyboard.press('KeyE');
+    else await page.evaluate(() => window.game.ui.openCrafting());
+    await page.waitForTimeout(300);
+    if (!(await page.evaluate(() => !!window.game.ui.screen))) throw new Error('écran non ouvert (' + open + ')');
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(300);
+    const st = await page.evaluate(() => ({ screen: !!window.game.ui.screen, paused: window.game.paused, pause: !!(window.game.ui.menu && window.game.ui.menu.isPause) }));
+    if (st.screen || !st.paused || !st.pause) throw new Error(JSON.stringify(st));
+    await click('Reprendre la partie');
+  }
+});
+await step('Échap dans le chat met le jeu en pause', async () => {
+  await page.keyboard.press('KeyT');
+  await page.waitForTimeout(200);
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(300);
+  const st = await page.evaluate(() => ({ chat: window.game.ui.chatOpen, paused: window.game.paused }));
+  if (st.chat || !st.paused) throw new Error(JSON.stringify(st));
+  await click('Reprendre la partie');
+});
 await step('changer une touche (Avancer -> I) et s\'en servir', async () => {
   await page.evaluate(() => window.game.ui.openPause());
   await page.waitForTimeout(200);

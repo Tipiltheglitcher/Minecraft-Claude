@@ -80,15 +80,13 @@ export class Input {
     c.addEventListener('contextmenu', (e) => e.preventDefault());
     document.addEventListener('pointerlockchange', () => {
       this.locked = document.pointerLockElement === this.canvas;
-      if (this.locked) this.dragLook = false;
+      if (this.locked) { this.dragLook = false; this.lockWorked = true; }
       if (!this.locked && this.game.state === 'playing' && !this.game.ui.screenOpen() && !this.dragLook && !this.ignoreUnlock) {
         this.game.ui.openPause();
       }
       this.ignoreUnlock = false;
     });
-    document.addEventListener('pointerlockerror', () => {
-      this.dragLook = true;
-    });
+    document.addEventListener('pointerlockerror', () => this.lockError());
     // tactile
     c.addEventListener('touchstart', (e) => this.onTouch(e, 'start'), { passive: false });
     c.addEventListener('touchmove', (e) => this.onTouch(e, 'move'), { passive: false });
@@ -100,10 +98,18 @@ export class Input {
     if (this.game.state !== 'playing') return;
     try {
       const p = this.canvas.requestPointerLock();
-      if (p && p.catch) p.catch(() => { this.dragLook = true; });
+      if (p && p.catch) p.catch(() => this.lockError());
     } catch (e) {
-      this.dragLook = true;
+      this.lockError();
     }
+  }
+
+  // Échec du verrouillage : si la souris a déjà été capturée, c'est qu'il manquait un clic → pause ;
+  // sinon le verrouillage est indisponible (page intégrée) → regard en glissant
+  lockError() {
+    if (this.locked) return;
+    if (this.lockWorked) this.game.ui.lockFailed();
+    else this.dragLook = true;
   }
 
   releaseLock() {

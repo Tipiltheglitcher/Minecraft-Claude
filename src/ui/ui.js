@@ -203,7 +203,9 @@ export class UI {
       return false;
     }
     if (this.screen) {
-      if (code === 'Escape' || code === k.inventory) { this.closeScreen(); e.preventDefault(); return true; }
+      // Échap ne peut pas recapturer la souris (règle des navigateurs) : on ouvre la pause
+      if (code === 'Escape') { e.preventDefault(); this.closeScreen(true); this.openPause(); return true; }
+      if (code === k.inventory) { this.closeScreen(); e.preventDefault(); return true; }
       for (let i = 1; i <= 9; i++) if (code === k['hotbar' + i]) { if (this.screen.numberKey) this.screen.numberKey(i - 1); return true; }
       if (code === k.drop && this.screen.dropHovered) { this.screen.dropHovered(e.ctrlKey); return true; }
       return true;
@@ -222,6 +224,12 @@ export class UI {
     return false;
   }
 
+  // La souris n'a pas pu être recapturée (pas de geste utilisateur) : pause plutôt qu'un jeu sans contrôle
+  lockFailed() {
+    const g = this.game;
+    if (g.state === 'playing' && !this.screen && !this.menu && !this.chatOpen) this.openPause();
+  }
+
   // ---------- chat ----------
   openChat(prefix) {
     this.chatOpen = true;
@@ -233,17 +241,17 @@ export class UI {
     setTimeout(() => { this.chatInput.focus(); this.chatInput.setSelectionRange(prefix.length, prefix.length); }, 0);
   }
 
-  closeChat() {
+  closeChat(silent = false) {
     this.chatOpen = false;
     this.chatInput.style.display = 'none';
     this.chatEl.classList.remove('open');
     this.chatInput.blur();
-    this.game.input.requestLock();
+    if (!silent) this.game.input.requestLock();
   }
 
   onChatKey(e) {
     e.stopPropagation();
-    if (e.code === 'Escape') { this.closeChat(); return; }
+    if (e.code === 'Escape') { this.closeChat(true); if (this.game.state === 'playing') this.openPause(); return; }
     if (e.code === 'ArrowUp') { if (this.chatHistory.length) { this.chatHistIdx = Math.min(this.chatHistory.length - 1, this.chatHistIdx + 1); this.chatInput.value = this.chatHistory[this.chatHistory.length - 1 - this.chatHistIdx]; } e.preventDefault(); return; }
     if (e.code === 'ArrowDown') { this.chatHistIdx = Math.max(-1, this.chatHistIdx - 1); this.chatInput.value = this.chatHistIdx >= 0 ? this.chatHistory[this.chatHistory.length - 1 - this.chatHistIdx] : ''; e.preventDefault(); return; }
     if (e.code === 'Tab') {
@@ -675,6 +683,7 @@ export class UI {
         slider('Musique', 'musicVolume', 0, 1, 0.05, pct);
         slider('Effets sonores', 'sfxVolume', 0, 1, 0.05, pct);
         slider('Ambiance (pluie, grottes...)', 'ambientVolume', 0, 1, 0.05, pct);
+        choice('Pauses entre les morceaux', 'musicPause', ['Aucune (musique continue)', 'Courtes', 'Longues (comme Minecraft)']);
         const b = el('button', 'btn opt', f, 'Écouter un morceau');
         b.addEventListener('click', () => { g.audio.init(); g.audio.playPiece(g.world ? g.world.dim : 'overworld'); });
       } else if (tab === 'controls') {

@@ -18,7 +18,8 @@ export class Audio {
     this.game = game;
     this.ctx = null;
     this.listener = { x: 0, y: 0, z: 0, yaw: 0 };
-    this.musicTimer = 20 * 30;
+    // musique : un morceau à la fois, enchaînés avec une courte pause
+    this.music = { bus: null, nodes: [], endAt: 0, nextAt: 0, mood: null, preparing: false };
     this.playing = 0;
     this.data = new Map();     // nom -> [données par variante]
     this.buffers = new Map();  // nom -> [AudioBuffer]
@@ -127,13 +128,22 @@ export class Audio {
     // ambiances en boucle
     this.amb = ctx.createGain();
     this.amb.connect(this.lowpass);
-    // musique
+    // musique : chaîne séparée (les bruitages forts ne la font plus baisser)
+    this.musicComp = ctx.createDynamicsCompressor();
+    this.musicComp.threshold.value = -6; this.musicComp.knee.value = 6; this.musicComp.ratio.value = 3;
+    this.musicComp.connect(ctx.destination);
+    this.musicMaster = ctx.createGain();
+    this.musicMaster.connect(this.musicComp);
     this.musicGain = ctx.createGain();
-    this.musicGain.connect(this.master);
+    this.musicGain.connect(this.musicMaster);
+    this.musicReverb = ctx.createConvolver();
+    this.musicReverb.buffer = this.reverb.buffer;
     this.musicSend = ctx.createGain();
     this.musicSend.gain.value = 0.35;
     this.musicGain.connect(this.musicSend);
-    this.musicSend.connect(this.reverb);
+    this.musicSend.connect(this.musicReverb);
+    this.musicReverb.connect(this.musicMaster);
+    this.music.nextAt = ctx.currentTime + 1.5;
     this.applyVolumes();
   }
 
@@ -159,6 +169,7 @@ export class Audio {
     if (!this.ctx) return;
     const s = this.game.settings;
     this.master.gain.value = s.volume;
+    this.musicMaster.gain.value = s.volume;
     this.sfx.gain.value = s.sfxVolume;
     this.amb.gain.value = s.sfxVolume * (s.ambientVolume ?? 1);
     this.musicGain.gain.value = s.musicVolume * 0.55;
@@ -201,6 +212,7 @@ export class Audio {
     this.setLoop('nether', dimLoop === 'nether' ? dimVol : 0);
     this.setLoop('end', dimLoop === 'end' ? dimVol : 0);
     this.setLoop('underwater', under ? 0.8 : 0);
+    this.updateMusic();
   }
 
   setLoop(name, vol) {
@@ -306,39 +318,87 @@ export class Audio {
   }
 
   // ---------- musique ----------
-  tickMusic() {
-    if (!this.ctx || this.game.settings.musicVolume <= 0) return;
-    if (--this.musicTimer > 0) return;
-    this.musicTimer = 20 * (90 + Math.random() * 150);
-    this.playPiece(this.game.world ? this.game.world.dim : 'overworld');
+  // Appelé à chaque image : enchaîne les morceaux selon l'endroit (menu, Surface, Nether, End)
+  updateMusic() {
+    const ctx = this.ctx, g = this.game, s = g.settings, M = this.music;
+    if (!ctx || ctx.state !== 'running' || M.preparing) return;
+    if (s.musicVolume <= 0) return;
+    if (g.state === 'credits') return;
+    const mood = g.state === 'playing' && g.world ? g.world.dim : g.state === 'loading' ? M.mood : 'menu';
+    if (!mood) return;
+    const now = ctx.currentTime;
+    // changement d'ambiance (menu -> jeu, passage dans le Nether...) : fondu puis nouveau morceau
+    if (M.mood && mood !== M.mood && now < M.endAt) {
+      this.fadeMusic(3);
+      M.nextAt = now + 3.5;
+    }
+    if (now < M.endAt || now < M.nextAt) return;
+    M.mood = mood;
+    this.schedule(compose(mood === 'menu' ? 'menu' : mood));
   }
 
+  // Pause entre deux morceaux selon le réglage
+  musicGap() {
+    const p = this.game.settings.musicPause || 0;
+    if (p === 0) return 2 + Math.random() * 4;
+    if (p === 1) return 15 + Math.random() * 25;
+    return 60 + Math.random() * 120;
+  }
+
+  // Fondu de sortie du morceau en cours
+  fadeMusic(sec = 2) {
+    const M = this.music, ctx = this.ctx;
+    if (!ctx || !M.bus) return;
+    const now = ctx.currentTime;
+    const bus = M.bus;
+    bus.gain.cancelScheduledValues(now);
+    bus.gain.setValueAtTime(bus.gain.value, now);
+    bus.gain.linearRampToValueAtTime(0.0001, now + sec);
+    for (const n of M.nodes) { try { n.stop(now + sec + 0.05); } catch (e) { /* déjà arrêté */ } }
+    setTimeout(() => { try { bus.disconnect(); } catch (e) { /* ignoré */ } }, (sec + 0.3) * 1000);
+    M.bus = null;
+    M.nodes = [];
+    M.endAt = now;
+  }
+
+  // Joue immédiatement un morceau (bouton des options)
   playPiece(dim) {
-    const piece = compose(dim);
-    this.schedule(piece);
+    if (!this.ctx) return;
+    this.fadeMusic(1.5);
+    this.music.nextAt = 0;
+    this.schedule(compose(dim));
   }
 
   // Prépare les notes nécessaires en tâche de fond, puis programme le morceau
   schedule(piece) {
+    const M = this.music;
+    M.preparing = true;
     for (const m of new Set(piece.notes.map((n) => n.m))) if (!this.piano.has(m)) this.enqueue(() => this.ensurePiano(m));
     this.enqueue(() => {
+      M.preparing = false;
       const ctx = this.ctx;
       if (!ctx) return;
       const t0 = ctx.currentTime + 0.4;
-      const dest = ctx.createGain();
-      dest.gain.value = 1;
-      dest.connect(this.musicGain);
+      const bus = ctx.createGain();
+      bus.gain.value = 1;
+      bus.connect(this.musicGain);
+      const nodes = [];
       for (const n of piece.notes) {
         const src = ctx.createBufferSource();
         src.buffer = this.pianoBuffer(n.m);
         const g = ctx.createGain();
         g.gain.value = n.v;
         src.connect(g);
-        g.connect(dest);
-        src.start(t0 + n.t);
+        g.connect(bus);
+        src.start(Math.max(t0, t0 + n.t));
         src.onended = () => { src.disconnect(); g.disconnect(); };
+        nodes.push(src);
       }
-      for (const p of piece.pads) this.pad(dest, t0 + p.t, p.d, p.ms, p.v);
+      for (const p of piece.pads) nodes.push(...this.pad(bus, t0 + p.t, p.d, p.ms, p.v));
+      M.bus = bus;
+      M.nodes = nodes;
+      M.endAt = t0 + piece.duration;
+      M.nextAt = M.endAt + this.musicGap();
     });
   }
 
@@ -356,6 +416,7 @@ export class Audio {
     f.Q.value = 0.5;
     f.connect(g);
     g.connect(dest);
+    const oscs = [];
     for (const m of midis) {
       for (const det of [-6, 5]) {
         const o = ctx.createOscillator();
@@ -368,13 +429,17 @@ export class Audio {
         og.connect(f);
         o.start(t0);
         o.stop(t0 + dur + 0.1);
+        o.onended = () => { o.disconnect(); og.disconnect(); };
+        oscs.push(o);
       }
     }
+    return oscs;
   }
 
-  // Thème du générique
+  // Thème du générique (remplace le morceau en cours)
   playCredits() {
     if (!this.ctx) return;
+    this.fadeMusic(2);
     this.schedule(compose('credits'));
   }
 }
@@ -399,6 +464,7 @@ export function compose(dim) {
   if (dim === 'nether') { mode = pick(['phrygian', 'minor']); root = 45 + Math.floor(R() * 4); bpm = 52 + R() * 10; padChance = 0.9; melodyChance = 0.5; }
   else if (dim === 'end') { mode = pick(['minor', 'dorian']); root = 47 + Math.floor(R() * 4); bpm = 46 + R() * 8; padChance = 1; melodyChance = 0.4; }
   else if (dim === 'credits') { mode = 'major'; root = 50; bpm = 68; padChance = 1; melodyChance = 1; }
+  else if (dim === 'menu') { mode = pick(['lydian', 'major']); root = 50 + Math.floor(R() * 5); bpm = 58 + R() * 8; padChance = 0.8; melodyChance = 0.9; }
   else { mode = pick(['major', 'major', 'lydian', 'dorian', 'minor']); root = 48 + Math.floor(R() * 7); bpm = 60 + R() * 18; padChance = 0.3; melodyChance = 0.85; }
   const sc = MODES[mode];
   const minorish = mode === 'minor' || mode === 'dorian' || mode === 'phrygian';
@@ -454,5 +520,5 @@ export function compose(dim) {
   // accord final
   const endT = bars * 4 * beat;
   [0, 4, 7 + 2].forEach((d, i) => notes.push({ t: endT + i * 0.08, m: deg(prog[0] + d) - (i === 0 ? 12 : 0), v: 0.35 }));
-  return { notes, pads };
+  return { notes, pads, duration: endT + 5 };
 }

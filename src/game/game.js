@@ -29,7 +29,7 @@ import { spawnEntity } from '../entity/registry.js';
 import { loadKeys } from './keybinds.js';
 
 const DEFAULT_SETTINGS = {
-  renderDistance: 7, fov: 70, sensitivity: 1, brightness: 0.35, volume: 0.8, musicVolume: 0.5, sfxVolume: 1, ambientVolume: 1, guiScale: 2, resolution: 1,
+  renderDistance: 7, fov: 70, sensitivity: 1, brightness: 0.35, volume: 0.8, musicVolume: 0.5, sfxVolume: 1, ambientVolume: 1, musicPause: 0, guiScale: 2, resolution: 1,
   difficulty: 2, particles: 2, fancyLeaves: true, smoothLighting: true, clouds: true, viewBobbing: true, invertY: false,
   toggleSneak: false, toggleSprint: false, keys: null,
   shaders: 0, shaderShadows: true, shaderShadowQuality: 1, shaderShadowDist: 64, shaderWaving: true, shaderWater: true, shaderBloom: true, shaderGodrays: true,
@@ -425,7 +425,6 @@ export class Game {
     this.spawner.tick();
     this.tickPortals();
     this.tickSleep();
-    this.audio.tickMusic();
     this.tickAmbient();
     if (w.tickCount % 20 === 0) this.checkAdvancements();
     if (w.tickCount % 1200 === 0) this.saveWorld();
