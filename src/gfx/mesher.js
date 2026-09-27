@@ -1,7 +1,7 @@
 // Construction des maillages des sections de chunk (16x16x16)
 import { BLOCKS, OPAQUE, EMIT, RENDER, R_CUBE, R_CROSS, R_LIQUID, R_MODEL, R_CROP, ROT_FACE, U, D } from '../data/blocks.js';
 import { B } from '../data/ids.js';
-import { tex } from './textures.js';
+import { tex } from './texindex.js';
 import { hash3 } from '../core/noise.js';
 
 export const VSIZE = 20; // octets par sommet
@@ -79,6 +79,12 @@ function faceUV(f, x, y, z) {
     default: return [x, z];
   }
 }
+function faceU(f, x, z) {
+  return f === 0 ? 16 - x : f === 1 ? x : f === 2 ? z : f === 3 ? 16 - z : x;
+}
+function faceV(f, y, z) {
+  return f < 4 ? 16 - y : z;
+}
 
 // ---------- Tampons de travail ----------
 const ids = new Uint8Array(P * P * P);
@@ -143,13 +149,32 @@ function tintFor(def, chunk, lx, lz) {
 }
 
 // ---------- Construction ----------
+// Chargement de données rembourrées reçues d'ailleurs (worker de maillage)
+export function loadPadded(i, m, l) {
+  ids.set(i);
+  metas.set(m);
+  lights.set(l);
+}
+
+// Collecte des blocs de la section et de leurs voisins (fil principal)
+export function gatherSection(world, chunk, sy) {
+  gather(world, chunk, sy);
+  return { ids, metas, lights };
+}
+
 export function buildSection(world, chunk, sy) {
   gather(world, chunk, sy);
+  return meshSection(chunk, sy, meshSettings);
+}
+
+// Maillage à partir des tableaux rembourrés ; info = { cx, cz, tint, biome }
+export function meshSection(info, sy, opts) {
+  const chunk = info;
   opaqueBuf.reset();
   transBuf.reset();
-  const fancy = meshSettings.fancyLeaves;
-  const smooth = meshSettings.smooth;
-  const wx0 = chunk.cx * 16, wy0 = sy * 16, wz0 = chunk.cz * 16;
+  const fancy = opts.fancyLeaves;
+  const smooth = opts.smooth;
+  const wx0 = chunk.cx * 16, wz0 = chunk.cz * 16;
   for (let y = 0; y < 16; y++)
     for (let z = 0; z < 16; z++)
       for (let x = 0; x < 16; x++) {
@@ -190,21 +215,68 @@ export function buildSection(world, chunk, sy) {
           model(out, p, x, y, z, id, meta, def, chunk);
         }
       }
-  const res = {};
+  const res = { vis: sectionVisibility() };
   if (opaqueBuf.n) res.opaque = { data: opaqueBuf.slice(), count: opaqueBuf.n };
   if (transBuf.n) res.trans = { data: transBuf.slice(), count: transBuf.n };
   return res;
 }
 
+// ---------- Visibilité (culling des grottes) ----------
+// Pour chaque paire de faces de la section, existe-t-il un chemin à travers des blocs non opaques ?
+// Bits : paire (a, b) avec a < b -> PAIR_BIT[a * 6 + b]. 0x7fff = tout est connecté.
+export const PAIR_BIT = new Int32Array(36);
+{
+  let k = 0;
+  for (let a = 0; a < 6; a++) for (let b = a + 1; b < 6; b++) { PAIR_BIT[a * 6 + b] = 1 << k; PAIR_BIT[b * 6 + a] = 1 << k; k++; }
+}
+export const VIS_ALL = 0x7fff;
+const visSeen = new Uint8Array(4096);
+const visStack = new Int16Array(4096);
+function sectionVisibility() {
+  visSeen.fill(0);
+  let opaqueCount = 0;
+  for (let y = 0; y < 16; y++) for (let z = 0; z < 16; z++) {
+    let p = pidx(0, y, z);
+    for (let x = 0; x < 16; x++, p++) if (OPAQUE[ids[p]]) { visSeen[(y << 8) | (z << 4) | x] = 1; opaqueCount++; }
+  }
+  if (opaqueCount === 0) return VIS_ALL;
+  if (opaqueCount === 4096) return 0;
+  let vis = 0;
+  for (let start = 0; start < 4096; start++) {
+    if (visSeen[start]) continue;
+    visSeen[start] = 1;
+    let sp = 0, faces = 0;
+    visStack[sp++] = start;
+    while (sp) {
+      const c = visStack[--sp];
+      const x = c & 15, z = (c >> 4) & 15, y = c >> 8;
+      if (z === 0) faces |= 1; if (z === 15) faces |= 2;
+      if (x === 0) faces |= 4; if (x === 15) faces |= 8;
+      if (y === 15) faces |= 16; if (y === 0) faces |= 32;
+      if (x > 0 && !visSeen[c - 1]) { visSeen[c - 1] = 1; visStack[sp++] = c - 1; }
+      if (x < 15 && !visSeen[c + 1]) { visSeen[c + 1] = 1; visStack[sp++] = c + 1; }
+      if (z > 0 && !visSeen[c - 16]) { visSeen[c - 16] = 1; visStack[sp++] = c - 16; }
+      if (z < 15 && !visSeen[c + 16]) { visSeen[c + 16] = 1; visStack[sp++] = c + 16; }
+      if (y > 0 && !visSeen[c - 256]) { visSeen[c - 256] = 1; visStack[sp++] = c - 256; }
+      if (y < 15 && !visSeen[c + 256]) { visSeen[c + 256] = 1; visStack[sp++] = c + 256; }
+    }
+    if (faces & (faces - 1)) {
+      for (let a = 0; a < 6; a++) if (faces & (1 << a)) for (let b = a + 1; b < 6; b++) if (faces & (1 << b)) vis |= PAIR_BIT[a * 6 + b];
+      if (vis === VIS_ALL) return vis;
+    }
+  }
+  return vis;
+}
+
+const SK = new Float32Array(4), BL = new Float32Array(4), SH = new Float32Array(4), AO = new Int32Array(4);
 function cubeFace(out, p, np, f, x, y, z, layer, rot, tint, smooth, flags) {
   const verts = FACE_VERTS[f];
   const offs = AO_OFF[f];
   const shadeF = FACE_SHADE[f];
-  const sk = [0, 0, 0, 0], bl = [0, 0, 0, 0], sh = [0, 0, 0, 0], ao = [0, 0, 0, 0];
   const nl = lights[np];
   for (let k = 0; k < 4; k++) {
     if (!smooth) {
-      sk[k] = (nl >> 4) * 17; bl[k] = (nl & 15) * 17; sh[k] = shadeF * 255; ao[k] = 3;
+      SK[k] = (nl >> 4) * 17; BL[k] = (nl & 15) * 17; SH[k] = shadeF * 255; AO[k] = 3;
       continue;
     }
     const o = offs[k];
@@ -212,23 +284,24 @@ function cubeFace(out, p, np, f, x, y, z, layer, rot, tint, smooth, flags) {
     const o1 = OPAQUE[ids[s1]], o2 = OPAQUE[ids[s2]];
     const oc = o1 && o2 ? 1 : OPAQUE[ids[c]];
     const a = o1 && o2 ? 0 : 3 - (o1 + o2 + oc);
-    ao[k] = a;
+    AO[k] = a;
     let ss = nl >> 4, bb = nl & 15, n = 1;
-    if (!o1) { ss += lights[s1] >> 4; bb += lights[s1] & 15; n++; }
-    if (!o2) { ss += lights[s2] >> 4; bb += lights[s2] & 15; n++; }
-    if (!oc) { ss += lights[c] >> 4; bb += lights[c] & 15; n++; }
-    sk[k] = (ss * 17) / n; bl[k] = (bb * 17) / n;
-    sh[k] = shadeF * AO_CURVE[a] * 255;
+    if (!o1) { const l1 = lights[s1]; ss += l1 >> 4; bb += l1 & 15; n++; }
+    if (!o2) { const l2 = lights[s2]; ss += l2 >> 4; bb += l2 & 15; n++; }
+    if (!oc) { const l3 = lights[c]; ss += l3 >> 4; bb += l3 & 15; n++; }
+    SK[k] = (ss * 17) / n; BL[k] = (bb * 17) / n;
+    SH[k] = shadeF * AO_CURVE[a] * 255;
   }
-  const start = ao[0] + ao[2] < ao[1] + ao[3] ? 1 : 0;
+  const start = AO[0] + AO[2] < AO[1] + AO[3] ? 1 : 0;
   const bx = x * 16, by = y * 16, bz = z * 16;
+  const tr = tint[0], tg = tint[1], tb = tint[2];
   for (let j = 0; j < 4; j++) {
     const k = (j + start) & 3;
     const v = verts[k];
     const px = v[0] * 16, py = v[1] * 16, pz = v[2] * 16;
-    let [u, vv] = faceUV(f, px, py, pz);
+    let u = faceU(f, px, pz), vv = faceV(f, py, pz);
     if (rot) { const t = u; u = 16 - vv; vv = t; }
-    out.v(bx + px, by + py, bz + pz, u, vv, layer, sk[k], bl[k], sh[k], tint[0], tint[1], tint[2], flags);
+    out.v(bx + px, by + py, bz + pz, u, vv, layer, SK[k], BL[k], SH[k], tr, tg, tb, flags);
   }
 }
 

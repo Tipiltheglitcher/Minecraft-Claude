@@ -436,6 +436,8 @@ export class UI {
       'Lumière : ' + w.getLight(bx, by + 1, bz) + ' (ciel ' + w.getSky(bx, by + 1, bz) + ', bloc ' + w.getBlockLight(bx, by + 1, bz) + ')',
       'Heure : ' + (g.time % 24000) + ' (jour ' + (Math.floor(g.time / 24000) + 1) + ')' + (g.weather.raining ? ' — pluie' : ''),
       'Entités : ' + w.entities.length + '   Chunks : ' + w.chunks.size + '   Particules : ' + g.particles.list.length,
+      'Rendu : ' + r.canvas.width + '×' + r.canvas.height + ' (échelle ' + Math.round((r.dynScale || 1) * 100) + ' %)' + (r.cullActive ? ', grottes masquées' : '') +
+        (g.workers && g.workers.ok ? '   Workers : ' + g.workers.workers.length + ' (' + g.workers.pending + ' tâches, ' + w.pending.size + ' chunks en cours)' : '   Workers : non'),
       'Graine : ' + g.meta.seed,
     ];
     if (t) lines.push('Cible : ' + (ITEMS[t.id] ? ITEMS[t.id].name : t.id) + ' (' + t.x + ', ' + t.y + ', ' + t.z + ') méta ' + w.getMeta(t.x, t.y, t.z));
@@ -658,6 +660,11 @@ export class UI {
         toggle('Éclairage lissé', 'smoothLighting', true);
         toggle('Nuages', 'clouds');
         toggle('Balancement de la vue', 'viewBobbing');
+        toggle('Résolution dynamique', 'dynamicRes');
+        toggle('Masquer les grottes invisibles', 'caveCulling');
+        const w = g.workers;
+        note('Résolution dynamique : baisse un peu la résolution quand le jeu ralentit, puis la remonte. ' +
+          (w && w.ok ? 'Calculs en parallèle : ' + w.workers.length + ' cœur(s) de processeur utilisés pour générer le terrain, le maillage et les sons.' : 'Calculs en parallèle indisponibles dans ce navigateur : tout est calculé sur le fil principal.'));
       } else if (tab === 'shaders') {
         choice('Mode shader', 'shaders', ['Désactivé', 'Bas', 'Moyen', 'Élevé', 'Ultra'], (v) => {
           if (SHADER_PRESETS[v]) Object.assign(s, SHADER_PRESETS[v]);

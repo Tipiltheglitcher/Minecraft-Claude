@@ -4,12 +4,19 @@ import { createProgram, createTextureArray, setupVertexAttribs } from './gl.js';
 import { WORLD_VS, WORLD_FS, SKY_VS, SKY_FS, LINE_VS, LINE_FS } from './shaders.js';
 import { buildTextures, tex, TEX_SIZE } from './textures.js';
 import { buildSkins, SKIN_SIZE, MODELS, renderModel, renderBlockCube, renderSprite } from './models.js';
-import { buildSection, GeoBuffer, meshSettings } from './mesher.js';
+import { buildSection, gatherSection, GeoBuffer, meshSettings, PAIR_BIT, VIS_ALL } from './mesher.js';
+import { chunkKey } from '../core/constants.js';
 import { ST_LIT } from '../world/chunk.js';
-import { BLOCKS, selectionBoxes, RENDER, R_CUBE, R_CROSS, R_CROP } from '../data/blocks.js';
+import { BLOCKS, OPAQUE, selectionBoxes, RENDER, R_CUBE, R_CROSS, R_CROP } from '../data/blocks.js';
 import { ITEMS } from '../data/items.js';
 import { B } from '../data/ids.js';
 import { Fancy } from './fancy.js';
+
+// Directions des faces (N, S, O, E, haut, bas) et face opposée
+const DIRX = [0, 0, -1, 1, 0, 0];
+const DIRY = [0, 0, 0, 0, 1, -1];
+const DIRZ = [-1, 1, 0, 0, 0, 0];
+const OPP = [1, 0, 3, 2, 5, 4];
 
 export class Renderer {
   constructor(canvas, game) {
@@ -63,6 +70,13 @@ export class Renderer {
     gl.bindVertexArray(null);
     this.entRanges = [];
     this.W = this.world;
+    this.meshSeq = 0;
+    this.meshInflight = 0;
+    this.changedChunks = []; // chunks remaillés depuis la dernière passe d'ombres
+    this.meshQ = [];
+    this.visList = [];
+    this.visPool = [];
+    this.visFrame = 0;
     this.fancy = null;
     this.fancyError = null;
 
@@ -99,8 +113,16 @@ export class Renderer {
 
   resize() {
     const s = this.game.settings;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2) * (s.resolution || 1);
-    const w = Math.floor(this.canvas.clientWidth * dpr), h = Math.floor(this.canvas.clientHeight * dpr);
+    // taille CSS relue seulement après un redimensionnement (évite une mise en page forcée par image)
+    if (!this.sizeObs) {
+      this.cssW = this.canvas.clientWidth; this.cssH = this.canvas.clientHeight;
+      this.sizeObs = true;
+      const upd = () => { this.cssW = this.canvas.clientWidth; this.cssH = this.canvas.clientHeight; };
+      if (typeof ResizeObserver !== 'undefined') new ResizeObserver(upd).observe(this.canvas);
+      else window.addEventListener('resize', upd);
+    }
+    const dpr = Math.min(window.devicePixelRatio || 1, 2) * (s.resolution || 1) * (this.dynScale || 1);
+    const w = Math.max(1, Math.floor(this.cssW * dpr)), h = Math.max(1, Math.floor(this.cssH * dpr));
     if (this.canvas.width !== w || this.canvas.height !== h) {
       this.canvas.width = w;
       this.canvas.height = h;
@@ -150,40 +172,181 @@ export class Renderer {
     return true;
   }
 
+  // Remaillage des sections modifiées : dans les workers, sauf à côté du joueur (réactivité)
   updateMeshes(world, budgetMs) {
     const t0 = performance.now();
+    const pool = this.game.workers && this.game.workers.ok ? this.game.workers : null;
     const pcx = Math.floor(this.cam.x) >> 4, pcz = Math.floor(this.cam.z) >> 4;
     const R = this.game.settings.renderDistance;
-    const q = [];
+    const q = this.meshQ;
+    q.length = 0;
     for (const c of world.chunks.values()) {
       const dx = c.cx - pcx, dz = c.cz - pcz;
       if (Math.abs(dx) > R || Math.abs(dz) > R) continue;
-      let any = false;
-      for (let s = 0; s < 8; s++) if (c.dirty[s]) { any = true; break; }
-      if (!any) continue;
+      const d = c.dirty;
+      if (!(d[0] | d[1] | d[2] | d[3] | d[4] | d[5] | d[6] | d[7])) continue;
       if (!this.canMesh(world, c)) continue;
-      q.push([dx * dx + dz * dz, c]);
+      c._d = dx * dx + dz * dz;
+      q.push(c);
     }
-    q.sort((a, b) => a[0] - b[0]);
-    let n = 0;
-    for (const [d, c] of q) {
+    q.sort((a, b) => a._d - b._d);
+    const maxInflight = pool ? pool.workers.length * 8 : 0;
+    const opts = { fancyLeaves: meshSettings.fancyLeaves, smooth: meshSettings.smooth };
+    const camSy = Math.floor(this.cam.y) >> 4;
+    let n = 0, sync = 0;
+    outer:
+    for (const c of q) {
       for (let s = 0; s < 8; s++) {
         if (!c.dirty[s]) continue;
+        if (!c.sectionHasBlocks[s]) {
+          c.dirty[s] = 0;
+          c.meshSeq[s] = ++this.meshSeq;
+          this.setMesh(c, s, null);
+          c.vis[s] = VIS_ALL;
+          continue;
+        }
+        const near = c._d <= 2 && Math.abs(s - camSy) <= 1;
+        if (!pool || (near && sync < 6)) {
+          c.dirty[s] = 0;
+          this.applyMesh(c, s, buildSection(world, c, s), ++this.meshSeq);
+          sync++;
+          n++;
+          if (!pool && c._d > 2 && performance.now() - t0 > budgetMs) break outer;
+          continue;
+        }
+        if (this.meshInflight >= maxInflight) break outer;
         c.dirty[s] = 0;
-        const old = c.meshes[s];
-        if (old) { this.freeMeshPart(old.opaque); this.freeMeshPart(old.trans); c.meshes[s] = null; }
-        if (!c.sectionHasBlocks[s]) continue;
-        const res = buildSection(world, c, s);
-        const m = {};
-        if (res.opaque) m.opaque = this.uploadMesh(res.opaque);
-        if (res.trans) m.trans = this.uploadMesh(res.trans);
-        c.meshes[s] = m.opaque || m.trans ? m : null;
+        const g = gatherSection(world, c, s);
+        const seq = ++this.meshSeq;
+        const msg = {
+          type: 'mesh', ids: g.ids.slice(), metas: g.metas.slice(), lights: g.lights.slice(),
+          tint: c.tint, biome: c.biome, cx: c.cx, cz: c.cz, sy: s, opts,
+        };
+        this.meshInflight++;
+        pool.run(msg, [msg.ids.buffer, msg.metas.buffer, msg.lights.buffer], (r) => {
+          this.meshInflight--;
+          if (this.game.world === world && world.chunks.get(chunkKey(c.cx, c.cz)) === c) this.applyMesh(c, s, r, seq);
+        }, 0, () => { this.meshInflight--; c.dirty[s] = 1; });
         n++;
+        if (performance.now() - t0 > budgetMs) break outer;
       }
-      if (d > 2 && performance.now() - t0 > budgetMs) break;
     }
     this.stats.meshedThisFrame = n;
     return n;
+  }
+
+  // Applique un maillage (sauf s'il est plus ancien que celui déjà affiché)
+  applyMesh(c, s, res, seq) {
+    if (seq < c.meshSeq[s]) return;
+    c.meshSeq[s] = seq;
+    const m = {};
+    if (res.opaque) m.opaque = this.uploadMesh(res.opaque);
+    if (res.trans) m.trans = this.uploadMesh(res.trans);
+    this.setMesh(c, s, m.opaque || m.trans ? m : null);
+    c.vis[s] = res.vis ?? VIS_ALL;
+  }
+
+  setMesh(c, s, m) {
+    const old = c.meshes[s];
+    if (old) { this.freeMeshPart(old.opaque); this.freeMeshPart(old.trans); }
+    c.meshes[s] = m;
+    if (this.changedChunks.length < 4096) this.changedChunks.push(c);
+  }
+
+  // ---------- Sections visibles ----------
+  // Parcours en largeur depuis la section de la caméra, à travers les faces connectées
+  // (algorithme de Minecraft) : les grottes cachées sous le sol ne sont pas dessinées.
+  collectVisible(world) {
+    const cam = this.cam;
+    const RD = this.game.settings.renderDistance;
+    const list = this.visList;
+    list.length = 0;
+    let used = 0;
+    const push = (m, ox, oy, oz, d) => {
+      let v = this.visPool[used];
+      if (!v) { v = {}; this.visPool[used] = v; }
+      used++;
+      v.m = m; v.ox = ox; v.oy = oy; v.oz = oz; v.d = d;
+      list.push(v);
+    };
+    const pcx = Math.floor(cam.x) >> 4, pcz = Math.floor(cam.z) >> 4;
+    const eye = world.getBlock(Math.floor(cam.x), Math.floor(cam.y), Math.floor(cam.z));
+    const cull = this.game.settings.caveCulling !== false && cam.y >= 0 && cam.y < 128 && !OPAQUE[eye] && world.getChunk(pcx, pcz);
+    this.cullActive = !!cull;
+    if (!cull) {
+      // repli : frustum seul, tri par distance
+      for (const c of world.chunks.values()) {
+        const dx = c.cx - pcx, dz = c.cz - pcz;
+        if (dx * dx + dz * dz > (RD + 0.5) * (RD + 0.5)) continue;
+        for (let s = 0; s < 8; s++) {
+          const m = c.meshes[s];
+          if (!m) continue;
+          const ox = c.cx * 16 - cam.x, oy = s * 16 - cam.y, oz = c.cz * 16 - cam.z;
+          if (!M.boxInFrustum(this.frustum, ox, oy, oz, ox + 16, oy + 16, oz + 16)) continue;
+          push(m, ox, oy, oz, (ox + 8) * (ox + 8) + (oy + 8) * (oy + 8) + (oz + 8) * (oz + 8));
+        }
+      }
+      list.sort((a, b) => a.d - b.d);
+      return list;
+    }
+    const half = RD + 1, G = half * 2 + 1, N = G * G * 8;
+    if (!this.visStamp || this.visStamp.length < N) {
+      this.visStamp = new Int32Array(N);
+      this.visQ = new Int32Array(N);
+      this.visFrom = new Int8Array(N);
+      this.visMask = new Uint8Array(N);
+      this.visCols = new Array(G * G);
+    }
+    this.visG = G; this.visHalf = half; this.visPcx = pcx; this.visPcz = pcz;
+    const stamp = this.visStamp, Q = this.visQ, FROM = this.visFrom, MASK = this.visMask, cols = this.visCols;
+    for (let i = 0; i < G; i++) for (let j = 0; j < G; j++) cols[i * G + j] = world.getChunk(pcx + i - half, pcz + j - half) || null;
+    const frame = ++this.visFrame;
+    const lim = (RD + 0.5) * (RD + 0.5);
+    const sy0 = Math.floor(cam.y) >> 4;
+    const start = ((half * G) + half) * 8 + sy0;
+    stamp[start] = frame;
+    Q[0] = start; FROM[0] = -1; MASK[0] = 0;
+    let head = 0, tail = 1;
+    const fr = this.frustum;
+    while (head < tail) {
+      const idx = Q[head], from = FROM[head], mask = MASK[head];
+      head++;
+      const sy = idx & 7, col = idx >> 3;
+      const gi = (col / G) | 0, gj = col - gi * G;
+      const c = cols[col];
+      const ox = (pcx + gi - half) * 16 - cam.x, oy = sy * 16 - cam.y, oz = (pcz + gj - half) * 16 - cam.z;
+      let vis = VIS_ALL;
+      if (c) {
+        const m = c.meshes[sy];
+        if (m) push(m, ox, oy, oz, 0);
+        vis = c.vis[sy];
+      }
+      for (let d = 0; d < 6; d++) {
+        if (mask & (1 << OPP[d])) continue;
+        if (from >= 0 && vis !== VIS_ALL && !(vis & PAIR_BIT[from * 6 + d])) continue;
+        const ni = gi + DIRX[d], nj = gj + DIRZ[d], ny = sy + DIRY[d];
+        if (ny < 0 || ny > 7 || ni < 0 || nj < 0 || ni >= G || nj >= G) continue;
+        const rx = ni - half, rz = nj - half;
+        if (rx * rx + rz * rz > lim) continue;
+        const nidx = (ni * G + nj) * 8 + ny;
+        if (stamp[nidx] === frame) continue;
+        stamp[nidx] = frame;
+        const bx = ox + DIRX[d] * 16, by = oy + DIRY[d] * 16, bz = oz + DIRZ[d] * 16;
+        if (!M.boxInFrustum(fr, bx, by, bz, bx + 16, by + 16, bz + 16)) continue;
+        Q[tail] = nidx; FROM[tail] = OPP[d]; MASK[tail] = mask | (1 << d);
+        tail++;
+      }
+    }
+    return list;
+  }
+
+  // La section contenant ce point a-t-elle été atteinte par le parcours de visibilité ?
+  sectionSeen(x, y, z) {
+    if (!this.cullActive || y < 0 || y >= 128) return true;
+    const gi = (Math.floor(x) >> 4) - this.visPcx + this.visHalf, gj = (Math.floor(z) >> 4) - this.visPcz + this.visHalf;
+    const G = this.visG;
+    if (gi < 0 || gj < 0 || gi >= G || gj >= G) return true;
+    return this.visStamp[(gi * G + gj) * 8 + (Math.floor(y) >> 4)] === this.visFrame;
   }
 
   // ---------- Caméra ----------
@@ -269,12 +432,30 @@ export class Renderer {
     return true;
   }
 
+  // Résolution dynamique : baisse la résolution de rendu quand les images ralentissent
+  adaptResolution(dt) {
+    const s = this.game.settings;
+    if (!s.dynamicRes) { this.dynScale = 1; return; }
+    if (!this.dynScale) { this.dynScale = 1; this.dynDts = []; this.dynT = 0; this.dynGood = 0; }
+    this.dynDts.push(dt);
+    this.dynT += dt;
+    if (this.dynT < 1) return;
+    const a = this.dynDts.sort((x, y) => x - y);
+    const fps = 1 / a[a.length >> 1];
+    this.dynDts.length = 0;
+    this.dynT = 0;
+    if (fps < 40 && this.dynScale > 0.5) { this.dynScale = Math.max(0.5, this.dynScale - 0.1); this.dynGood = 0; }
+    else if (fps > 56 && this.dynScale < 1) { if (++this.dynGood >= 4) { this.dynScale = Math.min(1, this.dynScale + 0.1); this.dynGood = 0; } }
+    else this.dynGood = 0;
+  }
+
   render(pt, dt) {
     const gl = this.gl;
     const game = this.game;
     const world = game.world;
     this.time += dt;
     this.pt = pt;
+    if (dt > 0) this.adaptResolution(dt);
     this.resize();
     this.setupCamera(pt);
     const env = game.sky.environment(world, this.cam, pt);
@@ -285,19 +466,21 @@ export class Renderer {
     this.updateMeshes(world, 5);
     const fancy = this.useFancy() ? this.fancy : null;
     const cam = this.cam;
+    const visible = this.collectVisible(world);
     this.buildEntities(pt);
 
     if (fancy) {
       fancy.computeLight(env, game);
       fancy.ensureTargets(this.canvas.width, this.canvas.height);
       if (game.settings.shaderShadows && env.dim !== 1) fancy.shadowPass(world, cam);
-      else fancy.lastShadow = -1;
+      else { fancy.lastShadow = -1; this.changedChunks.length = 0; }
       fancy.bindScene();
       this.W = fancy.world;
     } else {
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, this.canvas.width, this.canvas.height);
       this.W = this.world;
+      this.changedChunks.length = 0;
     }
     const W = this.W;
     gl.useProgram(W.program);
@@ -331,23 +514,8 @@ export class Renderer {
     gl.uniform1f(W.u.u_uvScale, 1 / 16);
     gl.uniform1f(W.u.u_alphaTest, 0.5);
 
-    // passe opaque
-    const visible = [];
-    const pcx = Math.floor(cam.x) >> 4, pcz = Math.floor(cam.z) >> 4;
-    const RD = game.settings.renderDistance;
+    // passe opaque (ordre du parcours : de l'avant vers l'arrière)
     let drawn = 0;
-    for (const c of world.chunks.values()) {
-      const dx = c.cx - pcx, dz = c.cz - pcz;
-      if (dx * dx + dz * dz > (RD + 0.5) * (RD + 0.5)) continue;
-      for (let s = 0; s < 8; s++) {
-        const m = c.meshes[s];
-        if (!m) continue;
-        const ox = c.cx * 16 - cam.x, oy = s * 16 - cam.y, oz = c.cz * 16 - cam.z;
-        if (!M.boxInFrustum(this.frustum, ox, oy, oz, ox + 16, oy + 16, oz + 16)) continue;
-        visible.push({ m, ox, oy, oz, d: (ox + 8) * (ox + 8) + (oy + 8) * (oy + 8) + (oz + 8) * (oz + 8) });
-      }
-    }
-    visible.sort((a, b) => a.d - b.d);
     for (const v of visible) {
       if (!v.m.opaque) continue;
       gl.uniform3f(W.u.u_offset, v.ox, v.oy, v.oz);
@@ -444,7 +612,8 @@ export class Renderer {
       const dx = ex - cam.x, dy = ey - cam.y, dz = ez - cam.z;
       if (dx * dx + dy * dy + dz * dz > R2) continue;
       const r = Math.max(e.width, e.height) + (e.renderRadius || 0);
-      const inView = M.boxInFrustum(this.frustum, dx - r, dy - r, dz - r, dx + r, dy + r * 2, dz + r);
+      let inView = M.boxInFrustum(this.frustum, dx - r, dy - r, dz - r, dx + r, dy + r * 2, dz + r);
+      if (inView && dx * dx + dz * dz > 64 && !this.sectionSeen(ex, ey + e.height * 0.5, ez)) inView = false;
       // hors champ : gardée seulement si proche (son ombre peut être visible)
       if (!inView && dx * dx + dz * dz > 32 * 32) continue;
       const bx = Math.floor(ex), by = Math.floor(ey + e.height * 0.5), bz = Math.floor(ez);

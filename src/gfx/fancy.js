@@ -38,6 +38,7 @@ export class Fancy {
     this.lightView = M.mat4();
     this.lightProj = M.mat4();
     this.lightVP = M.mat4();
+    this.shadowVP = M.mat4();
     this.lightFrustum = new Float32Array(24);
     this.exposure = 1;
     this.lastShadow = -1;
@@ -104,17 +105,27 @@ export class Fancy {
   ensureShadow(size) {
     if (size === this.shadowSize) return;
     const gl = this.gl;
-    if (this.shadowTex) { gl.deleteTexture(this.shadowTex); gl.deleteFramebuffer(this.shadowFbo); }
+    for (const k of ['shadowTex', 'staticTex']) if (this[k]) gl.deleteTexture(this[k]);
+    for (const k of ['shadowFbo', 'staticFbo']) if (this[k]) gl.deleteFramebuffer(this[k]);
     size = Math.min(size, gl.getParameter(gl.MAX_TEXTURE_SIZE));
     this.shadowSize = size;
-    const t = this.makeTex(size, size, gl.DEPTH_COMPONENT24, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
-    this.shadowTex = t;
-    this.shadowFbo = this.makeFbo(null, t);
-    // carte vide : entièrement éclairée
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFbo);
-    gl.clear(gl.DEPTH_BUFFER_BIT);
+    const mk = () => {
+      const t = this.makeTex(size, size, gl.DEPTH_COMPONENT24, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
+      return t;
+    };
+    // carte statique (terrain, recalculée seulement si nécessaire) et carte finale (+ créatures)
+    this.staticTex = mk();
+    this.staticFbo = this.makeFbo(null, this.staticTex);
+    this.shadowTex = mk();
+    this.shadowFbo = this.makeFbo(null, this.shadowTex);
+    this.sampleTex = this.staticTex;
+    this.staticValid = false;
+    for (const f of [this.staticFbo, this.shadowFbo]) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+      gl.clear(gl.DEPTH_BUFFER_BIT);
+    }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
@@ -161,57 +172,91 @@ export class Fancy {
   }
 
   // ---------- passe d'ombres ----------
+  // Carte d'ombres : le terrain est rendu autour d'un centre fixe (aligné sur une grille)
+  // et gardé en cache tant que le soleil, le centre et les chunks proches ne changent pas ;
+  // les créatures sont ajoutées par-dessus à chaque image.
   shadowPass(world, cam) {
     const r = this.r, gl = this.gl, s = r.game.settings;
     const L = this.L;
     const size = SHADOW_SIZES[s.shaderShadowQuality] || 2048;
     this.ensureShadow(size);
     const range = s.shaderShadowDist || 64;
-    this.range = range;
     const d = L.dir;
-    const back = 200;
-    // cible légèrement alignée sur une grille pour limiter le scintillement
-    const up = Math.abs(d[2]) > 0.95 ? [1, 0, 0] : [0, 0, 1];
-    M.lookAt(this.lightView, d[0] * back, d[1] * back, d[2] * back, 0, 0, 0, up[0], up[1], up[2]);
-    M.ortho(this.lightProj, -range, range, -range, range, 1, back * 2);
-    M.multiply(this.lightVP, this.lightProj, this.lightView);
-    M.frustumPlanes(this.lightVP, this.lightFrustum);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFbo);
-    gl.viewport(0, 0, this.shadowSize, this.shadowSize);
-    gl.clear(gl.DEPTH_BUFFER_BIT);
-    if (L.sun[0] + L.sun[1] + L.sun[2] < 0.01) { this.lastShadow = 0; return; }
-    const P = this.shadowProg;
-    gl.useProgram(P.program);
-    gl.uniformMatrix4fv(P.u.u_lightVP, false, this.lightVP);
-    gl.uniform1f(P.u.u_time, r.time);
-    gl.uniform3f(P.u.u_camPos, cam.x, cam.y, cam.z);
-    gl.uniform1f(P.u.u_waving, s.shaderWaving ? 1 : 0);
-    gl.uniform1i(P.u.u_tex, 0);
-    gl.uniform1f(P.u.u_alphaTest, 0.5);
-    gl.uniform1f(P.u.u_posScale, 1 / 16);
-    gl.uniform1f(P.u.u_uvScale, 1 / 16);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D_ARRAY, r.blockTex);
-    gl.disable(gl.CULL_FACE);
-    gl.enable(gl.POLYGON_OFFSET_FILL);
-    gl.polygonOffset(1.5, 2);
-    const pcx = Math.floor(cam.x) >> 4, pcz = Math.floor(cam.z) >> 4;
+    const changed = r.changedChunks;
+    if (L.sun[0] + L.sun[1] + L.sun[2] < 0.01) { this.lastShadow = 0; this.staticValid = false; changed.length = 0; return; }
+    const SNAP = 4;
+    const C = [Math.floor(cam.x / SNAP) * SNAP, Math.floor(cam.y / SNAP) * SNAP, Math.floor(cam.z / SNAP) * SNAP];
     const CR = Math.ceil(range / 16) + 1;
-    for (const c of world.chunks.values()) {
-      const dx = c.cx - pcx, dz = c.cz - pcz;
-      if (Math.abs(dx) > CR || Math.abs(dz) > CR) continue;
-      for (let sy = 0; sy < 8; sy++) {
-        const m = c.meshes[sy];
-        if (!m || !m.opaque) continue;
-        const ox = c.cx * 16 - cam.x, oy = sy * 16 - cam.y, oz = c.cz * 16 - cam.z;
-        if (!M.boxInFrustum(this.lightFrustum, ox, oy, oz, ox + 16, oy + 16, oz + 16)) continue;
-        gl.uniform3f(P.u.u_offset, ox, oy, oz);
-        gl.bindVertexArray(m.opaque.vao);
-        gl.drawElements(gl.TRIANGLES, (m.opaque.count / 4) * 6, gl.UNSIGNED_INT, 0);
+    const ccx = C[0] >> 4, ccz = C[2] >> 4;
+    let need = !this.staticValid || range !== this.range || !this.C || C[0] !== this.C[0] || C[1] !== this.C[1] || C[2] !== this.C[2];
+    need = need || !this.lastDir || d[0] * this.lastDir[0] + d[1] * this.lastDir[1] + d[2] * this.lastDir[2] < 0.999997;
+    need = need || (s.shaderWaving ? 1 : 0) !== this.lastWaving;
+    if (!need) for (const c of changed) if (Math.abs(c.cx - ccx) <= CR && Math.abs(c.cz - ccz) <= CR) { need = true; break; }
+    changed.length = 0;
+    this.range = range;
+    const P = this.shadowProg;
+    const common = () => {
+      gl.useProgram(P.program);
+      gl.uniform1f(P.u.u_time, r.time);
+      gl.uniform1f(P.u.u_waving, s.shaderWaving ? 1 : 0);
+      gl.uniform1i(P.u.u_tex, 0);
+      gl.uniform1f(P.u.u_alphaTest, 0.5);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.disable(gl.CULL_FACE);
+      gl.enable(gl.POLYGON_OFFSET_FILL);
+      gl.polygonOffset(1.5, 2);
+      gl.viewport(0, 0, this.shadowSize, this.shadowSize);
+    };
+    if (need) {
+      const back = 200;
+      const up = Math.abs(d[2]) > 0.95 ? [1, 0, 0] : [0, 0, 1];
+      M.lookAt(this.lightView, d[0] * back, d[1] * back, d[2] * back, 0, 0, 0, up[0], up[1], up[2]);
+      M.ortho(this.lightProj, -range, range, -range, range, 1, back * 2);
+      M.multiply(this.lightVP, this.lightProj, this.lightView);
+      M.frustumPlanes(this.lightVP, this.lightFrustum);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.staticFbo);
+      common();
+      gl.clear(gl.DEPTH_BUFFER_BIT);
+      gl.uniformMatrix4fv(P.u.u_lightVP, false, this.lightVP);
+      gl.uniform3f(P.u.u_camPos, C[0], C[1], C[2]);
+      gl.uniform1f(P.u.u_posScale, 1 / 16);
+      gl.uniform1f(P.u.u_uvScale, 1 / 16);
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, r.blockTex);
+      for (const c of world.chunks.values()) {
+        if (Math.abs(c.cx - ccx) > CR || Math.abs(c.cz - ccz) > CR) continue;
+        for (let sy = 0; sy < 8; sy++) {
+          const m = c.meshes[sy];
+          if (!m || !m.opaque) continue;
+          const ox = c.cx * 16 - C[0], oy = sy * 16 - C[1], oz = c.cz * 16 - C[2];
+          if (!M.boxInFrustum(this.lightFrustum, ox, oy, oz, ox + 16, oy + 16, oz + 16)) continue;
+          gl.uniform3f(P.u.u_offset, ox, oy, oz);
+          gl.bindVertexArray(m.opaque.vao);
+          gl.drawElements(gl.TRIANGLES, (m.opaque.count / 4) * 6, gl.UNSIGNED_INT, 0);
+        }
       }
+      this.C = C;
+      this.lastDir = d.slice();
+      this.lastWaving = s.shaderWaving ? 1 : 0;
+      this.staticValid = true;
+      this.shadowRenders = (this.shadowRenders || 0) + 1;
     }
-    // créatures
-    r.drawEntityRanges(P, true);
+    // matrice pour des positions relatives à la caméra
+    M.translate(this.shadowVP, this.lightVP, cam.x - this.C[0], cam.y - this.C[1], cam.z - this.C[2]);
+    // créatures : copie de la carte statique puis ajout des silhouettes
+    const ents = r.entRanges.some((e) => !e.alpha && e.ox * e.ox + e.oz * e.oz < range * range);
+    if (ents) {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.staticFbo);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, this.shadowFbo);
+      gl.blitFramebuffer(0, 0, this.shadowSize, this.shadowSize, 0, 0, this.shadowSize, this.shadowSize, gl.DEPTH_BUFFER_BIT, gl.NEAREST);
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+      gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFbo);
+      common();
+      gl.uniformMatrix4fv(P.u.u_lightVP, false, this.shadowVP);
+      gl.uniform3f(P.u.u_camPos, cam.x, cam.y, cam.z);
+      r.drawEntityRanges(P, true);
+      this.sampleTex = this.shadowTex;
+    } else this.sampleTex = this.staticTex;
     gl.disable(gl.POLYGON_OFFSET_FILL);
     gl.enable(gl.CULL_FACE);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -274,14 +319,14 @@ export class Fancy {
     gl.uniform2f(W.u.u_nearFar, 0.05, 1000);
     const shadows = s.shaderShadows && this.lastShadow === 1 && env.dim !== 1;
     gl.uniform1f(W.u.u_shadowOn, shadows ? 1 : 0);
-    gl.uniformMatrix4fv(W.u.u_shadowVP, false, this.lightVP);
+    gl.uniformMatrix4fv(W.u.u_shadowVP, false, this.shadowVP);
     gl.uniform1f(W.u.u_shadowRange, this.range || 64);
     gl.uniform1f(W.u.u_shadowSize, this.shadowSize);
     gl.uniform1i(W.u.u_shadow, 1);
     gl.uniform1i(W.u.u_sceneColor, 2);
     gl.uniform1i(W.u.u_sceneDepth, 3);
     gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this.shadowTex);
+    gl.bindTexture(gl.TEXTURE_2D, this.sampleTex || this.shadowTex);
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_2D, this.copyColor);
     gl.activeTexture(gl.TEXTURE3);

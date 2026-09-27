@@ -27,11 +27,13 @@ import { SOLID, BLOCKS } from '../data/blocks.js';
 import { clamp, lookDir } from '../core/math.js';
 import { spawnEntity } from '../entity/registry.js';
 import { loadKeys } from './keybinds.js';
+import { WorkerPool } from '../core/workers.js';
+import { texIndex } from '../gfx/textures.js';
 
 const DEFAULT_SETTINGS = {
   renderDistance: 7, fov: 70, sensitivity: 1, brightness: 0.35, volume: 0.8, musicVolume: 0.5, sfxVolume: 1, ambientVolume: 1, musicPause: 0, guiScale: 2, resolution: 1,
   difficulty: 2, particles: 2, fancyLeaves: true, smoothLighting: true, clouds: true, viewBobbing: true, invertY: false,
-  toggleSneak: false, toggleSprint: false, keys: null,
+  toggleSneak: false, toggleSprint: false, keys: null, dynamicRes: true, caveCulling: true,
   shaders: 0, shaderShadows: true, shaderShadowQuality: 1, shaderShadowDist: 64, shaderWaving: true, shaderWater: true, shaderBloom: true, shaderGodrays: true,
   shaderVignette: true, shaderExposure: 1, shaderSaturation: 1.1,
   keepInventory: false, doDaylightCycle: true, doMobSpawning: true, mobGriefing: true, fireSpread: true, naturalRegen: true, mobLoot: true,
@@ -52,6 +54,9 @@ export class Game {
     this.audio = new Audio(this);
     this.input = new Input(this, canvas);
     this.renderer = new Renderer(canvas, this);
+    // workers : génération, maillage et sons en parallèle du jeu
+    const nw = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
+    this.workers = typeof Worker !== 'undefined' ? new WorkerPool(nw, { type: 'init', tex: [...texIndex] }) : null;
     this.sky = new Sky(this);
     this.particles = new Particles(this);
     this.interaction = new Interaction(this);

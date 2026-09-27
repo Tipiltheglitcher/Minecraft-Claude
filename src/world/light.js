@@ -153,6 +153,41 @@ export class LightEngine {
     chunk.state = ST_LIT;
   }
 
+  // Chunk déjà éclairé en interne (worker) : raccorde la lumière avec les voisins éclairés,
+  // dans les deux sens, en ne semant que les cellules de bord où elle doit passer
+  finishChunk(chunk, hasSky) {
+    this.current = chunk;
+    this._c = null;
+    const q = this.q, w = this.world;
+    const L = chunk.light, B = chunk.blocks;
+    const sides = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+    for (const sky of hasSky ? [true, false] : [false]) {
+      let n = 0;
+      for (const [dx, dz] of sides) {
+        const nc = w.getChunk(chunk.cx + dx, chunk.cz + dz);
+        if (!nc || nc.state < ST_LIT) continue;
+        const NL = nc.light, NB = nc.blocks;
+        for (let k = 0; k < 16; k++) {
+          // (ax, az) : notre cellule de bord ; (bx, bz) : la cellule voisine en face
+          const ax = dx === -1 ? 0 : dx === 1 ? 15 : k, az = dz === -1 ? 0 : dz === 1 ? 15 : k;
+          const bx = dx === -1 ? 15 : dx === 1 ? 0 : k, bz = dz === -1 ? 15 : dz === 1 ? 0 : k;
+          for (let y = 0; y < 128; y++) {
+            const ai = (y << 8) | (az << 4) | ax, bi = (y << 8) | (bz << 4) | bx;
+            const la = sky ? L[ai] >> 4 : L[ai] & 15, lb = sky ? NL[bi] >> 4 : NL[bi] & 15;
+            if (la > lb + 1 && OPACITY[NB[bi]] < 15) {
+              q[n * 3] = chunk.cx * 16 + ax; q[n * 3 + 1] = y; q[n * 3 + 2] = chunk.cz * 16 + az; n++;
+            } else if (lb > la + 1 && OPACITY[B[ai]] < 15) {
+              q[n * 3] = nc.cx * 16 + bx; q[n * 3 + 1] = y; q[n * 3 + 2] = nc.cz * 16 + bz; n++;
+            }
+          }
+        }
+      }
+      if (n) this.propagate(n, sky);
+    }
+    this.current = null;
+    chunk.state = ST_LIT;
+  }
+
   // Ajoute à la file les cellules de bord des voisins déjà éclairés
   pullBorders(chunk, n, sky) {
     const w = this.world;

@@ -98,11 +98,20 @@ Si le navigateur refuse le verrouillage de la souris (page intégrée dans une a
 
 Astuce : `/locate fort` et `/locate forteresse` donnent les coordonnées des structures.
 
+## Performances
+
+- **Calculs en parallèle** : la génération du terrain, l'éclairage interne des chunks, le maillage des sections et la synthèse des sons tournent dans des Web Workers (jusqu'à 4 cœurs). Le fil principal ne fait plus que raccorder la lumière aux bords et envoyer la géométrie à la carte graphique. Les sections voisines du joueur sont remaillées immédiatement pour que poser ou casser un bloc reste instantané. Sans workers (très vieux navigateurs), tout repasse automatiquement sur le fil principal.
+- **Grottes invisibles masquées** : chaque section de 16³ blocs connaît les faces reliées par des blocs non opaques ; un parcours depuis la caméra (comme dans Minecraft) ne dessine que ce qui peut être vu. En surface, le sous-sol n'est plus dessiné, et l'ordre avant → arrière évite de dessiner des pixels cachés.
+- **Mode shader** : la carte d'ombres du terrain est gardée en cache et recalculée seulement quand le soleil bouge assez, quand le joueur change de zone ou quand un chunk proche change ; seules les créatures sont redessinées à chaque image.
+- **Résolution dynamique** (Options → Vidéo) : baisse la résolution de rendu quand le jeu passe sous 40 images/s, puis la remonte.
+- Mesures (vol rapide à 20 blocs/s, distance 10) : temps du fil principal par image **13,6 ms → 3,3 ms** en moyenne, pire image **32 ms → 14 ms** ; chargement des chunks **≈ 9 ms → 0,3 ms** par image ; raccord de la lumière **0,6 ms → 0,05 ms** par chunk.
+
 ## Architecture
 
 ```
 src/
-  core/      maths (matrices, frustum), bruit simplex, constantes
+  core/      maths (matrices, frustum), bruit simplex, constantes, pool de workers
+  worker/    code des workers (génération, éclairage interne, maillage, sons)
   data/      identifiants, blocs, objets, recettes
   world/     chunks, monde, lumière, fluides et comportements des blocs, explosions
   world/gen/ générateurs (Surface, Nether, End), arbres et minerais, structures
@@ -124,6 +133,7 @@ Les tests lancent le jeu dans Chromium sans interface (Playwright) :
 - `node tools/logic-test.mjs` rejoue toute la progression (artisanat, four, minage, portails, yeux de l'Ender, dragon, générique, sauvegarde) ;
 - `node tools/feature-test.mjs` vérifie les autres mécaniques (lit, portes, TNT, creeper, squelette, zombie, seaux, agriculture, apparitions, enchantement, commerce, alambic, mort) ;
 - `node tools/menu-test.mjs` parcourt les menus avec de vrais clics (dont le changement d'une touche) ;
+- `node tools/perf-test.mjs [page] [distance]` mesure le temps du fil principal pendant un vol rapide ; `node tools/profile.mjs` affiche les fonctions les plus coûteuses (profileur de Chrome) ; `node tools/bench.mjs` mesure génération, éclairage et maillage dans Node ;
 - `node tools/music-test.mjs` vérifie que la musique joue au menu puis s'enchaîne en jeu ;
 - `node tools/shader-test.mjs` synthétise tous les sons et fait des captures du mode shader (jour, coucher de soleil, nuit, eau, ombres) ;
 - `node tools/smoke-test.mjs <scénario>` produit des captures (`tour`, `mobs`, `ui`, `nether`, `end`, `stronghold`, `village`, `night`, `items`…).

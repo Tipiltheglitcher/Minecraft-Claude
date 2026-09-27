@@ -29,11 +29,53 @@ export class Audio {
     this.queue = [];
     this.pumping = false;
     this.envState = { under: false, reverb: 0.1 };
-    // pré-calcul en tâche de fond pendant l'écran titre
+    this.requested = new Set();
+    // pré-calcul en tâche de fond (workers si possible) pendant l'écran titre
+    setTimeout(() => this.prewarm(), 100);
+  }
+
+  get pool() {
+    const p = this.game.workers;
+    return p && p.ok ? p : null;
+  }
+
+  // Calcule des données dans un worker (ou sur le fil principal par petits morceaux), puis done(données)
+  compute(msg, local, done, priority = 2) {
+    const pool = this.pool;
+    const fallback = () => this.enqueue(() => done(local()));
+    if (pool) pool.run(msg, null, done, priority, fallback);
+    else fallback();
+  }
+
+  prewarm() {
     const order = [...PRIORITY, ...SOUND_NAMES.filter((n) => !PRIORITY.includes(n))];
-    for (const n of order) for (let v = 0; v < variantCount(n); v++) this.queue.push(() => this.ensureData(n, v));
-    for (const m of [48, 52, 55, 57, 60, 62, 64, 67, 69, 72]) this.queue.push(() => this.ensurePiano(m));
-    setTimeout(() => this.pump(), 200);
+    for (const n of order) for (let v = 0; v < variantCount(n); v++) this.request(n, v);
+    for (const m of [48, 52, 55, 57, 60, 62, 64, 67, 69, 72]) this.requestPiano(m, null);
+  }
+
+  request(name, v) {
+    const k = name + '#' + v;
+    if (this.requested.has(k)) return;
+    this.requested.add(k);
+    this.compute({ type: 'sfx', name, variant: v }, () => synth(name, v), (d) => this.storeData(name, v, d));
+  }
+
+  requestPiano(m, done, priority = 2) {
+    this.compute({ type: 'piano', midi: m, vel: 0.7 }, () => ({ data: pianoNote(m, 0.7) }), (r) => {
+      if (!this.piano.has(m)) this.piano.set(m, r.data);
+      if (done) done();
+    }, priority);
+  }
+
+  hasData(name, v) {
+    const arr = this.data.get(name);
+    return !!(arr && arr[v]);
+  }
+
+  storeData(name, v, d) {
+    let arr = this.data.get(name);
+    if (!arr) { arr = []; this.data.set(name, arr); }
+    if (!arr[v]) arr[v] = d;
   }
 
   pump() {
@@ -220,8 +262,8 @@ export class Audio {
     if (!L) {
       if (vol <= 0.001) return;
       L = this.loops[name] = { vol: 0, pending: true };
-      this.enqueue(() => {
-        const d = synthLoop(name);
+      this.compute({ type: 'loop', name }, () => synthLoop(name), (d) => {
+        if (!this.ctx) return;
         const src = this.ctx.createBufferSource();
         src.buffer = this.toBuffer(d);
         src.loop = true;
@@ -279,8 +321,18 @@ export class Audio {
     const dest = this.out(x, y, z, vol * (GAIN[name] ?? 1), range);
     if (!dest) return;
     let buffer;
+    let v = Math.floor(Math.random() * nv);
+    if (!this.hasData(name, v)) {
+      // pas encore calculé : on le demande et on prend une autre variante prête ;
+      // calcul immédiat seulement sans workers
+      this.request(name, v);
+      let alt = -1;
+      for (let k = 0; k < nv; k++) if (this.hasData(name, k)) { alt = k; break; }
+      if (alt >= 0) v = alt;
+      else if (this.pool) return;
+    }
     try {
-      buffer = this.getBuffer(name, Math.floor(Math.random() * nv));
+      buffer = this.getBuffer(name, v);
     } catch (e) {
       return;
     }
@@ -373,8 +425,9 @@ export class Audio {
   schedule(piece) {
     const M = this.music;
     M.preparing = true;
-    for (const m of new Set(piece.notes.map((n) => n.m))) if (!this.piano.has(m)) this.enqueue(() => this.ensurePiano(m));
-    this.enqueue(() => {
+    const missing = [...new Set(piece.notes.map((n) => n.m))].filter((m) => !this.piano.has(m));
+    let left = missing.length;
+    const start = () => {
       M.preparing = false;
       const ctx = this.ctx;
       if (!ctx) return;
@@ -399,7 +452,9 @@ export class Audio {
       M.nodes = nodes;
       M.endAt = t0 + piece.duration;
       M.nextAt = M.endAt + this.musicGap();
-    });
+    };
+    if (!left) start();
+    for (const m of missing) this.requestPiano(m, () => { if (--left === 0) start(); }, 1);
   }
 
   // Nappe douce : dents de scie désaccordées, filtre fermé, attaque lente

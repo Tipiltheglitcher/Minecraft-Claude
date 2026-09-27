@@ -1,5 +1,8 @@
 // Génération procédurale de toutes les textures 16x16 (blocs, objets, particules)
 import { Painter, hex, shade, mix } from './paint.js';
+import { texIndex, tex, hasTex, setTextureIndex } from './texindex.js';
+
+export { texIndex, tex, hasTex, setTextureIndex };
 
 const T = {}; // textures de blocs
 const IT = {}; // icônes d'objets
@@ -1134,7 +1137,6 @@ IT.map = IT.map || null;
 
 // ---------- Construction de l'atlas ----------
 export const TEX_SIZE = 16;
-export const texIndex = new Map();
 export const texPainters = new Map(); // nom -> Painter (pour les icônes)
 let layers = [];
 
@@ -1156,16 +1158,4 @@ export function buildTextures() {
   return { layers, index: texIndex };
 }
 
-export function tex(name) {
-  const i = texIndex.get(name);
-  if (i === undefined) {
-    if (!tex.warned) tex.warned = new Set();
-    if (!tex.warned.has(name)) { tex.warned.add(name); console.warn('Texture manquante', name); }
-    return texIndex.get('stone') ?? 0;
-  }
-  return i;
-}
 
-export function hasTex(name) {
-  return texIndex.has(name);
-}

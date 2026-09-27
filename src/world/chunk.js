@@ -20,6 +20,8 @@ export class Chunk {
     this.dirty = new Uint8Array(NSEC); // sections à remailler
     this.meshes = new Array(NSEC).fill(null);
     this.sectionHasBlocks = new Uint8Array(NSEC);
+    this.vis = new Uint16Array(NSEC).fill(0x7fff); // connectivité des faces (culling des grottes)
+    this.meshSeq = new Int32Array(NSEC); // dernier maillage appliqué (résultats asynchrones)
     this.blockEntities = new Map(); // index -> données (coffre, four...)
     this.modified = false;
     this.pendingEntities = null; // entités à faire apparaître (générées avec le chunk)

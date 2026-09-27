@@ -36,6 +36,8 @@ export class World {
     this.gen = dim === 'overworld' ? new OverworldGen(seed) : dim === 'nether' ? new NetherGen(seed) : new EndGen(seed);
     this._lastChunk = null;
     this.data = {}; // données propres à la dimension (dragon, portail...)
+    this.pending = new Set(); // chunks demandés aux workers
+    this.arrived = []; // chunks générés par les workers, à intégrer
   }
 
   // ---------- Chunks ----------
@@ -69,18 +71,59 @@ export class World {
     } else {
       this.gen.generate(c);
     }
+    this.addChunk(c);
+    return c;
+  }
+
+  // Intègre un chunk généré (fil principal ou worker) : éclairage, voisins, entités
+  addChunk(c, preLit = false) {
+    const key = chunkKey(c.cx, c.cz);
     c.state = ST_GENERATED;
     c.updateSectionFlags();
     this.chunks.set(key, c);
-    this.light.initChunk(c, this.hasSky);
+    if (preLit) this.light.finishChunk(c, this.hasSky);
+    else this.light.initChunk(c, this.hasSky);
     c.markAllDirty();
     // les voisins doivent être remaillés (bords)
     for (const [dx, dz] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
-      const n = this.getChunk(cx + dx, cz + dz);
+      const n = this.getChunk(c.cx + dx, c.cz + dz);
       if (n) n.markAllDirty();
     }
     this.onChunkLoaded(c);
-    return c;
+  }
+
+  // Demande la génération d'un chunk à un worker
+  requestChunk(cx, cz, pool) {
+    const key = chunkKey(cx, cz);
+    this.pending.add(key);
+    const light = !this.saved.has(key);
+    pool.run({ type: 'gen', dim: this.dim, seed: this.seed, cx, cz, light, hasSky: this.hasSky }, null, (r) => {
+      this.pending.delete(key);
+      r.cx = cx; r.cz = cz;
+      this.arrived.push(r);
+    }, 1, () => this.pending.delete(key));
+  }
+
+  // Résultat d'un worker -> chunk du monde
+  integrate(r, pcx, pcz, radius) {
+    const key = chunkKey(r.cx, r.cz);
+    if (this.chunks.has(key)) return false;
+    if (Math.max(Math.abs(r.cx - pcx), Math.abs(r.cz - pcz)) > radius + 3) return false;
+    const c = new Chunk(r.cx, r.cz);
+    c.biome = r.biome;
+    c.tint = r.tint;
+    const s = this.saved.get(key);
+    let preLit = false;
+    if (s) this.deserialize(c, s);
+    else {
+      c.blocks = r.blocks;
+      c.meta = r.meta;
+      c.blockEntities = new Map(r.be);
+      if (r.light) { c.light = r.light; preLit = true; }
+    }
+    c.pendingEntities = r.ents;
+    this.addChunk(c, preLit);
+    return true;
   }
 
   onChunkLoaded(c) {
@@ -123,14 +166,34 @@ export class World {
     const pcx = Math.floor(px) >> 4, pcz = Math.floor(pz) >> 4;
     const t0 = performance.now();
     let generated = 0;
+    const pool = this.game && this.game.workers && this.game.workers.ok ? this.game.workers : null;
+    // chunks générés par les workers : les plus proches d'abord
+    if (this.arrived.length) {
+      const dd = (r) => Math.max(Math.abs(r.cx - pcx), Math.abs(r.cz - pcz));
+      this.arrived.sort((a, b) => dd(a) - dd(b));
+      let k = 0;
+      while (k < this.arrived.length && (k === 0 || performance.now() - t0 < budgetMs)) {
+        if (this.integrate(this.arrived[k], pcx, pcz, radius)) generated++;
+        k++;
+      }
+      this.arrived.splice(0, k);
+    }
+    const maxPending = pool ? pool.workers.length * 6 : 0;
     const r = radius + 1;
+    outer:
     for (let d = 0; d <= r; d++) {
       for (let dx = -d; dx <= d; dx++)
         for (let dz = -d; dz <= d; dz++) {
           if (Math.max(Math.abs(dx), Math.abs(dz)) !== d) continue;
           if (dx * dx + dz * dz > r * r + 2) continue;
           const cx = pcx + dx, cz = pcz + dz;
-          if (this.chunks.has(chunkKey(cx, cz))) continue;
+          const key = chunkKey(cx, cz);
+          if (this.chunks.has(key) || this.pending.has(key)) continue;
+          if (pool) {
+            if (this.pending.size >= maxPending) break outer;
+            this.requestChunk(cx, cz, pool);
+            continue;
+          }
           this.loadOrGenerate(cx, cz);
           generated++;
           if (performance.now() - t0 > budgetMs) return generated;

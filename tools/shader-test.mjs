@@ -58,7 +58,7 @@ const audio = await page.evaluate(async () => {
   const a = window.game.audio;
   a.init();
   const t0 = performance.now();
-  while (a.queue.length && performance.now() - t0 < 30000) await new Promise((r) => setTimeout(r, 100));
+  while ((a.queue.length || a.data.size < 100) && performance.now() - t0 < 30000) await new Promise((r) => setTimeout(r, 100));
   const names = [...a.data.keys()];
   for (const n of ['click', 'pop', 'cow', 'zombie', 'explode', 'mat_stone', 'thunder']) a.play(n, null, null, null, 0.1);
   a.playPiece('overworld');
