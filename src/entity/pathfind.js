@@ -25,6 +25,38 @@ function canStand(world, x, y, z, h) {
   return false;
 }
 
+// Tas binaire minimal sur f
+function heapPush(h, n) {
+  h.push(n);
+  let i = h.length - 1;
+  while (i > 0) {
+    const p = (i - 1) >> 1;
+    if (h[p].f <= n.f) break;
+    h[i] = h[p]; i = p;
+  }
+  h[i] = n;
+}
+
+function heapPop(h) {
+  const top = h[0];
+  const last = h.pop();
+  if (h.length) {
+    let i = 0;
+    const len = h.length;
+    for (;;) {
+      const l = i * 2 + 1, r = l + 1;
+      let m = i;
+      let mf = last.f;
+      if (l < len && h[l].f < mf) { m = l; mf = h[l].f; }
+      if (r < len && h[r].f < mf) m = r;
+      if (m === i) break;
+      h[i] = h[m]; i = m;
+    }
+    h[i] = last;
+  }
+  return top;
+}
+
 export function findPath(world, sx, sy, sz, tx, ty, tz, opts = {}) {
   const h = opts.height || 2;
   const maxNodes = opts.maxNodes || 500;
@@ -40,12 +72,8 @@ export function findPath(world, sx, sy, sz, tx, ty, tz, opts = {}) {
   let count = 0;
   const reach = opts.reach ?? 1;
   while (open.length && count < maxNodes) {
-    // extraction du minimum (tas simple)
-    let bi = 0;
-    for (let i = 1; i < open.length; i++) if (open[i].f < open[bi].f) bi = i;
-    const cur = open[bi];
-    open[bi] = open[open.length - 1];
-    open.pop();
+    const cur = heapPop(open);
+    if (cur.closed) continue;
     cur.closed = true;
     count++;
     const hd = Math.abs(tx - cur.x) + Math.abs(ty - cur.y) + Math.abs(tz - cur.z);
@@ -74,13 +102,16 @@ export function findPath(world, sx, sy, sz, tx, ty, tz, opts = {}) {
       let n = nodes.get(k);
       if (n) {
         if (n.closed || g >= n.g) continue;
-        n.g = g; n.parent = cur;
-        n.f = g + Math.abs(tx - nx) + Math.abs(ty - ny) + Math.abs(tz - nz);
+        // nouvelle entrée dans le tas (l'ancienne sera ignorée car fermée ensuite)
+        const m = { x: nx, y: ny, z: nz, g, f: g + Math.abs(tx - nx) + Math.abs(ty - ny) + Math.abs(tz - nz), parent: cur, closed: false };
+        n.closed = true;
+        nodes.set(k, m);
+        heapPush(open, m);
       } else {
         n = { x: nx, y: ny, z: nz, g, f: 0, parent: cur, closed: false };
         n.f = g + Math.abs(tx - nx) + Math.abs(ty - ny) + Math.abs(tz - nz);
         nodes.set(k, n);
-        open.push(n);
+        heapPush(open, n);
       }
     }
   }

@@ -16,7 +16,7 @@ function texCanvas(name, tint) {
   const p = texPainters.get(name) || texPainters.get('stone');
   c = document.createElement('canvas');
   c.width = c.height = p.size;
-  const ctx = c.getContext('2d');
+  const ctx = c.getContext('2d', { willReadFrequently: true });
   const img = ctx.createImageData(p.size, p.size);
   img.data.set(p.data);
   if (tint) {
@@ -100,7 +100,7 @@ export function iconURL(stack) {
   if (url) return url;
   const c = document.createElement('canvas');
   c.width = c.height = SIZE;
-  const ctx = c.getContext('2d');
+  const ctx = c.getContext('2d', { willReadFrequently: true });
   const d = ITEMS[id];
   const bd = id < 256 ? BLOCKS[id] : null;
   try {
@@ -170,7 +170,7 @@ export function hudIcon(name) {
   const art = HUD_ART[name];
   const c = document.createElement('canvas');
   c.width = 9; c.height = 9;
-  const ctx = c.getContext('2d');
+  const ctx = c.getContext('2d', { willReadFrequently: true });
   // contour
   const px = (x, y, col) => { ctx.fillStyle = col; ctx.fillRect(x, y, 1, 1); };
   art.forEach((row, y) => [...row].forEach((ch, x) => { if (ch !== '.') px(x, y + 1, HUD_PAL[ch]); }));
@@ -183,7 +183,7 @@ export function textureURL(name, scale = 1) {
   const c0 = texCanvas(name);
   const c = document.createElement('canvas');
   c.width = c.height = 16 * scale;
-  const ctx = c.getContext('2d');
+  const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(c0, 0, 0, 16 * scale, 16 * scale);
   return c.toDataURL();

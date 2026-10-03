@@ -33,7 +33,7 @@ import { texIndex } from '../gfx/textures.js';
 const DEFAULT_SETTINGS = {
   renderDistance: 7, fov: 70, sensitivity: 1, brightness: 0.35, volume: 0.8, musicVolume: 0.5, sfxVolume: 1, ambientVolume: 1, musicPause: 0, guiScale: 2, resolution: 1,
   difficulty: 2, particles: 2, fancyLeaves: true, smoothLighting: true, clouds: true, viewBobbing: true, invertY: false,
-  toggleSneak: false, toggleSprint: false, keys: null, dynamicRes: true, caveCulling: true,
+  toggleSneak: false, toggleSprint: false, keys: null, dynamicRes: false, caveCulling: true, settingsVersion: 2,
   shaders: 0, shaderShadows: true, shaderShadowQuality: 1, shaderShadowDist: 64, shaderWaving: true, shaderWater: true, shaderBloom: true, shaderGodrays: true,
   shaderVignette: true, shaderExposure: 1, shaderSaturation: 1.1,
   keepInventory: false, doDaylightCycle: true, doMobSpawning: true, mobGriefing: true, fireSpread: true, naturalRegen: true, mobLoot: true,
@@ -55,7 +55,8 @@ export class Game {
     this.input = new Input(this, canvas);
     this.renderer = new Renderer(canvas, this);
     // workers : génération, maillage et sons en parallèle du jeu
-    const nw = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
+    const hc = navigator.hardwareConcurrency || 4;
+    const nw = hc <= 2 ? 1 : hc <= 4 ? 2 : hc <= 6 ? 3 : 4;
     this.workers = typeof Worker !== 'undefined' ? new WorkerPool(nw, { type: 'init', tex: [...texIndex] }) : null;
     this.sky = new Sky(this);
     this.particles = new Particles(this);
@@ -86,8 +87,8 @@ export class Game {
     this.applySettings();
     this.ui.openTitle();
     requestAnimationFrame((t) => this.loop(t));
-    window.addEventListener('beforeunload', () => { if (this.state === 'playing') this.saveWorld(); });
-    document.addEventListener('visibilitychange', () => { if (document.hidden && this.state === 'playing') this.saveWorld(); });
+    window.addEventListener('beforeunload', () => { if (this.state === 'playing') this.saveWorld(true); });
+    document.addEventListener('visibilitychange', () => { if (document.hidden && this.state === 'playing') this.saveWorld(true); });
   }
 
   // ---------- réglages ----------
@@ -96,6 +97,8 @@ export class Game {
     try { s = JSON.parse(localStorage.getItem('mcjs-settings') || '{}'); } catch (e) { s = {}; }
     const out = Object.assign({}, DEFAULT_SETTINGS, s);
     out.keys = loadKeys(s.keys);
+    // v2 : la résolution dynamique devient facultative (elle redimensionnait l'image en jeu)
+    if ((s.settingsVersion || 1) < 2) { out.dynamicRes = false; out.settingsVersion = 2; }
     return out;
   }
 
@@ -294,8 +297,20 @@ export class Game {
   }
 
   // ---------- sauvegarde ----------
-  async saveWorld() {
+  // Sauvegarde : seulement les chunks changés, sérialisés par petits paquets entre deux images
+  // (immediate = d'un coup, pour la fermeture de la page)
+  async saveWorld(immediate = false) {
     if (!this.meta || !this.player) return;
+    if (this.saving && !immediate) return;
+    this.saving = true;
+    try {
+      await this.saveWorldInner(immediate);
+    } finally {
+      this.saving = false;
+    }
+  }
+
+  async saveWorldInner(immediate) {
     const m = this.meta;
     m.time = this.time;
     m.lastPlayed = Date.now();
@@ -313,8 +328,18 @@ export class Game {
     try {
       await this.saves.putWorld(JSON.parse(JSON.stringify(m)));
       for (const w of Object.values(this.worlds)) {
-        w.flushSaved();
-        for (const c of w.chunks.values()) if (c.modified) w.dirtyKeys.add((c.cx + 32768) * 65536 + (c.cz + 32768));
+        if (immediate) w.flushSaved();
+        else {
+          let t = performance.now();
+          for (const c of [...w.chunks.values()]) {
+            if (!c.saveDirty) continue;
+            w.saveChunk(c);
+            if (performance.now() - t > 2) {
+              await new Promise((r) => setTimeout(r, 16));
+              t = performance.now();
+            }
+          }
+        }
         if (!w.dirtyKeys.size) continue;
         const entries = [];
         for (const k of w.dirtyKeys) { const v = w.saved.get(k); if (v) entries.push([k, v]); }
@@ -328,7 +353,7 @@ export class Game {
 
   async quitToTitle() {
     this.ui.loading('Sauvegarde...', 0.5);
-    await this.saveWorld();
+    await this.saveWorld(true);
     for (const w of Object.values(this.worlds)) this.renderer.disposeAll(w);
     this.worlds = {};
     this.world = null;
@@ -356,8 +381,8 @@ export class Game {
           this.frameInput();
           this.acc += dt;
           let n = 0;
-          while (this.acc >= 0.05 && n < 5) { this.tick(); this.acc -= 0.05; n++; }
-          if (n === 5) this.acc = 0;
+          while (this.acc >= 0.05 && n < 3) { this.tick(); this.acc -= 0.05; n++; }
+          if (n === 3 && this.acc >= 0.05) this.acc = 0;
         }
         this.world.updateChunks(p.x, p.z, this.settings.renderDistance, 4);
         const pt = this.paused ? 1 : Math.min(1, this.acc / 0.05);

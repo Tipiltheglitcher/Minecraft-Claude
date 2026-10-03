@@ -23,7 +23,8 @@ export class Chunk {
     this.vis = new Uint16Array(NSEC).fill(0x7fff); // connectivité des faces (culling des grottes)
     this.meshSeq = new Int32Array(NSEC); // dernier maillage appliqué (résultats asynchrones)
     this.blockEntities = new Map(); // index -> données (coffre, four...)
-    this.modified = false;
+    this.modified = false; // diffère du terrain généré (à conserver)
+    this.saveDirty = false; // modifié depuis la dernière sauvegarde
     this.pendingEntities = null; // entités à faire apparaître (générées avec le chunk)
     this.lastSeen = 0;
     this.inhabited = 0;
@@ -71,7 +72,37 @@ export class Chunk {
   }
 }
 
-// Compression RLE simple pour la sauvegarde
+// Compression RLE compacte (octets : valeur puis longueur en varint) : rapide à cloner pour IndexedDB
+export function rleEncodeBytes(arr) {
+  const out = new Uint8Array(arr.length * 2 + 8);
+  let o = 0, i = 0;
+  const len = arr.length;
+  while (i < len) {
+    const v = arr[i];
+    let n = 1;
+    while (i + n < len && arr[i + n] === v) n++;
+    out[o++] = v;
+    let c = n;
+    while (c >= 128) { out[o++] = (c & 127) | 128; c >>>= 7; }
+    out[o++] = c;
+    i += n;
+  }
+  return out.slice(0, o);
+}
+
+function rleDecodeBytes(src, target) {
+  let p = 0, o = 0;
+  while (o < src.length) {
+    const v = src[o++];
+    let n = 0, sh = 0, b;
+    do { b = src[o++]; n |= (b & 127) << sh; sh += 7; } while (b & 128);
+    target.fill(v, p, p + n);
+    p += n;
+  }
+  return target;
+}
+
+// Ancien format (tableaux de nombres), toujours lu pour les sauvegardes existantes
 export function rleEncode(arr) {
   const out = [];
   let i = 0;
@@ -86,6 +117,7 @@ export function rleEncode(arr) {
 }
 
 export function rleDecode(list, target) {
+  if (list instanceof Uint8Array) return rleDecodeBytes(list, target);
   let p = 0;
   for (let i = 0; i < list.length; i += 2) {
     const v = list[i], n = list[i + 1];

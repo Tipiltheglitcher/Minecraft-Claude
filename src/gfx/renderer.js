@@ -73,6 +73,7 @@ export class Renderer {
     this.meshSeq = 0;
     this.meshInflight = 0;
     this.changedChunks = []; // chunks remaillés depuis la dernière passe d'ombres
+    this.meshResults = []; // maillages reçus des workers, à envoyer à la carte graphique
     this.meshQ = [];
     this.visList = [];
     this.visPool = [];
@@ -173,7 +174,24 @@ export class Renderer {
   }
 
   // Remaillage des sections modifiées : dans les workers, sauf à côté du joueur (réactivité)
+  // Applique les maillages reçus des workers, les plus proches d'abord, dans un budget de temps
+  applyMeshResults(world, budgetMs) {
+    const q = this.meshResults;
+    if (!q.length) return;
+    const t0 = performance.now();
+    const pcx = Math.floor(this.cam.x) >> 4, pcz = Math.floor(this.cam.z) >> 4;
+    if (q.length > 1) q.sort((a, b) => (Math.abs(a.c.cx - pcx) + Math.abs(a.c.cz - pcz)) - (Math.abs(b.c.cx - pcx) + Math.abs(b.c.cz - pcz)));
+    let k = 0;
+    while (k < q.length) {
+      const j = q[k++];
+      if (j.world === world && world.chunks.get(chunkKey(j.c.cx, j.c.cz)) === j.c) this.applyMesh(j.c, j.s, j.r, j.seq);
+      if (performance.now() - t0 > budgetMs) break;
+    }
+    q.splice(0, k);
+  }
+
   updateMeshes(world, budgetMs) {
+    this.applyMeshResults(world, 3);
     const t0 = performance.now();
     const pool = this.game.workers && this.game.workers.ok ? this.game.workers : null;
     const pcx = Math.floor(this.cam.x) >> 4, pcz = Math.floor(this.cam.z) >> 4;
@@ -225,7 +243,8 @@ export class Renderer {
         this.meshInflight++;
         pool.run(msg, [msg.ids.buffer, msg.metas.buffer, msg.lights.buffer], (r) => {
           this.meshInflight--;
-          if (this.game.world === world && world.chunks.get(chunkKey(c.cx, c.cz)) === c) this.applyMesh(c, s, r, seq);
+          // envoyé à la carte graphique plus tard, dans le budget de l'image (pas de rafale)
+          this.meshResults.push({ world, c, s, r, seq });
         }, 0, () => { this.meshInflight--; c.dirty[s] = 1; });
         n++;
         if (performance.now() - t0 > budgetMs) break outer;
@@ -436,7 +455,7 @@ export class Renderer {
   adaptResolution(dt) {
     const s = this.game.settings;
     if (!s.dynamicRes) { this.dynScale = 1; return; }
-    if (!this.dynScale) { this.dynScale = 1; this.dynDts = []; this.dynT = 0; this.dynGood = 0; }
+    if (!this.dynScale) { this.dynScale = 1; this.dynDts = []; this.dynT = 0; this.dynGood = 0; this.dynBad = 0; }
     this.dynDts.push(dt);
     this.dynT += dt;
     if (this.dynT < 1) return;
@@ -444,9 +463,10 @@ export class Renderer {
     const fps = 1 / a[a.length >> 1];
     this.dynDts.length = 0;
     this.dynT = 0;
-    if (fps < 40 && this.dynScale > 0.5) { this.dynScale = Math.max(0.5, this.dynScale - 0.1); this.dynGood = 0; }
-    else if (fps > 56 && this.dynScale < 1) { if (++this.dynGood >= 4) { this.dynScale = Math.min(1, this.dynScale + 0.1); this.dynGood = 0; } }
-    else this.dynGood = 0;
+    // changement de taille rare (il coûte une réallocation) : 3 s lentes pour baisser, 8 s fluides pour remonter
+    if (fps < 38) { this.dynGood = 0; if (++this.dynBad >= 3 && this.dynScale > 0.5) { this.dynScale = Math.max(0.5, this.dynScale - 0.15); this.dynBad = 0; } }
+    else if (fps > 56 && this.dynScale < 1) { this.dynBad = 0; if (++this.dynGood >= 8) { this.dynScale = Math.min(1, this.dynScale + 0.15); this.dynGood = 0; } }
+    else { this.dynGood = 0; this.dynBad = 0; }
   }
 
   render(pt, dt) {
@@ -610,7 +630,8 @@ export class Renderer {
       if (e === game.player && game.cameraMode === 0) continue;
       const ex = M.lerp(e.prevX, e.x, pt), ey = M.lerp(e.prevY, e.y, pt), ez = M.lerp(e.prevZ, e.z, pt);
       const dx = ex - cam.x, dy = ey - cam.y, dz = ez - cam.z;
-      if (dx * dx + dy * dy + dz * dz > R2) continue;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > R2 || (d2 > 64 * 64 && !e.renderRadius)) continue;
       const r = Math.max(e.width, e.height) + (e.renderRadius || 0);
       let inView = M.boxInFrustum(this.frustum, dx - r, dy - r, dz - r, dx + r, dy + r * 2, dz + r);
       if (inView && dx * dx + dz * dz > 64 && !this.sectionSeen(ex, ey + e.height * 0.5, ez)) inView = false;

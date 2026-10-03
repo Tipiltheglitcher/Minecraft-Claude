@@ -58,10 +58,21 @@ export class Mob extends Living {
     this.pathTimer--;
     const tx = Math.floor(x), ty = Math.floor(y), tz = Math.floor(z);
     if (!this.path || this.pathTimer <= 0 || !this.pathTarget || Math.abs(this.pathTarget[0] - tx) + Math.abs(this.pathTarget[2] - tz) > 2) {
-      this.pathTimer = 15 + rint(0, 15);
-      this.pathTarget = [tx, ty, tz];
-      this.path = findPath(this.world, Math.floor(this.x), Math.floor(this.y + 0.01), Math.floor(this.z), tx, ty, tz, { height: Math.ceil(this.height), maxNodes: 300, maxDrop: 3 });
-      if (!this.path.length) this.path = [{ x: tx, y: ty, z: tz }];
+      // budget commun à toutes les créatures : au plus ~2 ms de recherche de chemin par tick
+      const w = this.world;
+      if (w.pathTick !== w.tickCount) { w.pathTick = w.tickCount; w.pathSpent = 0; }
+      if (w.pathSpent < 2) {
+        const t = performance.now();
+        this.pathTimer = 15 + rint(0, 15);
+        this.pathTarget = [tx, ty, tz];
+        this.path = findPath(w, Math.floor(this.x), Math.floor(this.y + 0.01), Math.floor(this.z), tx, ty, tz, { height: Math.ceil(this.height), maxNodes: 300, maxDrop: 3 });
+        if (!this.path.length) this.path = [{ x: tx, y: ty, z: tz }];
+        w.pathSpent += performance.now() - t;
+      } else {
+        // pas de budget ce tick-ci : on garde l'ancien chemin (ou on va tout droit) et on réessaie bientôt
+        this.pathTimer = 1;
+        if (!this.path || !this.path.length) this.path = [{ x: tx, y: ty, z: tz }];
+      }
     }
     this.followPath(speedMul);
   }

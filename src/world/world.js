@@ -1,5 +1,5 @@
 // Monde : gestion des chunks, blocs, ticks et entités d'une dimension
-import { Chunk, ST_EMPTY, ST_GENERATED, ST_LIT, rleEncode, rleDecode } from './chunk.js';
+import { Chunk, ST_EMPTY, ST_GENERATED, ST_LIT, rleEncodeBytes, rleDecode } from './chunk.js';
 import { LightEngine } from './light.js';
 import { chunkKey, WH } from '../core/constants.js';
 import { BLOCKS, OPACITY, EMIT, SOLID, collisionBoxes, blockDef, LIQUID, REPLACEABLE } from '../data/blocks.js';
@@ -146,7 +146,7 @@ export class World {
 
   unloadChunk(c) {
     const key = chunkKey(c.cx, c.cz);
-    if (c.modified) { this.saved.set(key, this.serialize(c)); if (this.dirtyKeys) this.dirtyKeys.add(key); }
+    if (c.modified && (c.saveDirty || !this.saved.has(key))) { this.saved.set(key, this.serialize(c)); if (this.dirtyKeys) this.dirtyKeys.add(key); }
     if (this.game && this.game.renderer) this.game.renderer.disposeChunk(c);
     this.chunks.delete(key);
     if (this._lastChunk === c) this._lastChunk = null;
@@ -214,7 +214,8 @@ export class World {
   serialize(c) {
     const be = [];
     for (const [idx, data] of c.blockEntities) be.push([idx, data]);
-    return { b: rleEncode(c.blocks), m: rleEncode(c.meta), be };
+    c.saveDirty = false;
+    return { b: rleEncodeBytes(c.blocks), m: rleEncodeBytes(c.meta), be };
   }
 
   deserialize(c, s) {
@@ -224,10 +225,16 @@ export class World {
     c.modified = true;
   }
 
-  // Sauvegarde de tous les chunks modifiés chargés
+  // Sauvegarde des chunks changés depuis la dernière fois
   flushSaved() {
-    for (const c of this.chunks.values()) if (c.modified) { const k = chunkKey(c.cx, c.cz); this.saved.set(k, this.serialize(c)); if (this.dirtyKeys) this.dirtyKeys.add(k); }
+    for (const c of this.chunks.values()) if (c.saveDirty) this.saveChunk(c);
     return this.saved;
+  }
+
+  saveChunk(c) {
+    const k = chunkKey(c.cx, c.cz);
+    this.saved.set(k, this.serialize(c));
+    if (this.dirtyKeys) this.dirtyKeys.add(k);
   }
 
   // ---------- Accès aux blocs ----------
@@ -287,6 +294,7 @@ export class World {
     c.blocks[i] = id;
     c.meta[i] = meta;
     c.modified = true;
+    c.saveDirty = true;
     if (id) c.sectionHasBlocks[y >> 4] = 1;
     if (old !== id) {
       const be = c.blockEntities.get(i);
@@ -343,20 +351,32 @@ export class World {
     if (!c) return;
     c.blockEntities.set((y << 8) | ((z & 15) << 4) | (x & 15), be);
     c.modified = true;
+    c.saveDirty = true;
     if (be.type === 'furnace' || be.type === 'spawner' || be.type === 'brewing') this.tickingBE.set(x + ',' + y + ',' + z, { x, y, z, be });
   }
 
   // ---------- Collisions ----------
   // Remplit "out" avec les boîtes [x0,y0,z0,x1,y1,z1] en coordonnées monde
+  // Boîtes de collision des blocs dans une zone ; les tableaux de boîtes sont réutilisés
+  // d'un appel à l'autre (aucune allocation pour les blocs pleins)
   getCollisions(x0, y0, z0, x1, y1, z1, out) {
-    out.length = 0;
+    const pool = out._pool || (out._pool = []);
+    let n = 0;
+    const put = (a, b, c, d, e, f) => {
+      let r = pool[n];
+      if (!r) r = pool[n] = [0, 0, 0, 0, 0, 0];
+      r[0] = a; r[1] = b; r[2] = c; r[3] = d; r[4] = e; r[5] = f;
+      out[n++] = r;
+    };
+    let qx = 0, qy = 0, qz = 0;
+    const nb = (dx, dy, dz) => this.getBlock(qx + dx, qy + dy, qz + dz);
     const bx0 = Math.floor(x0), by0 = Math.floor(y0) - 1, bz0 = Math.floor(z0);
     const bx1 = Math.floor(x1), by1 = Math.floor(y1), bz1 = Math.floor(z1);
     for (let x = bx0; x <= bx1; x++)
       for (let z = bz0; z <= bz1; z++) {
         const c = this.getChunk(x >> 4, z >> 4);
         if (!c || c.state < ST_GENERATED) {
-          out.push([x, by0, z, x + 1, by1 + 1, z + 1]);
+          put(x, by0, z, x + 1, by1 + 1, z + 1);
           continue;
         }
         for (let y = by0; y <= by1; y++) {
@@ -364,11 +384,15 @@ export class World {
           const i = (y << 8) | ((z & 15) << 4) | (x & 15);
           const id = c.blocks[i];
           if (!SOLID[id]) continue;
-          const boxes = collisionBoxes(id, c.meta[i], (dx, dy, dz) => this.getBlock(x + dx, y + dy, z + dz));
+          const d = BLOCKS[id];
+          if (!d.collide && !(d.render === 'model' && d.boxes)) { put(x, y, z, x + 1, y + 1, z + 1); continue; }
+          qx = x; qy = y; qz = z;
+          const boxes = collisionBoxes(id, c.meta[i], nb);
           if (!boxes) continue;
-          for (const b of boxes) out.push([x + b.x0 / 16, y + b.y0 / 16, z + b.z0 / 16, x + b.x1 / 16, y + b.y1 / 16, z + b.z1 / 16]);
+          for (const b of boxes) put(x + b.x0 / 16, y + b.y0 / 16, z + b.z0 / 16, x + b.x1 / 16, y + b.y1 / 16, z + b.z1 / 16);
         }
       }
+    out.length = n;
     return out;
   }
 
@@ -498,10 +522,16 @@ export class World {
     for (const t of this.tickingBE.values()) updates.blockEntityTick(this, t.x, t.y, t.z, t.be, player);
     // entités
     const ents = this.entities;
+    const tc = this.tickCount;
     for (let i = 0; i < ents.length; i++) {
       const e = ents[i];
       if (e.removed) continue;
       if (!e.isPlayer && !this.isChunkReady(Math.floor(e.x), Math.floor(e.z)) && !e.persistent) continue;
+      // créatures loin du joueur : simulées un tick sur quatre (comme la distance de simulation)
+      if (player && e.navigateTo && !e.persistent && e.type !== 'ender_dragon' && ((e.id + tc) & 3)) {
+        const dx = e.x - player.x, dz = e.z - player.z;
+        if (dx * dx + dz * dz > 64 * 64) { e.prevX = e.x; e.prevY = e.y; e.prevZ = e.z; continue; }
+      }
       e.tick();
     }
     let j = 0;

@@ -492,7 +492,7 @@ function furnaceTick(world, x, y, z, be) {
   }
   if (burning && Math.random() < 0.08) world.game?.particles?.spawn(world, 'flame', x + 0.5 + (Math.random() - 0.5) * 0.4, y + 0.3, z + 0.5, 0, 0.01, 0);
   const c = world.getChunk(x >> 4, z >> 4);
-  if (c) c.modified = true;
+  if (c) { c.modified = true; c.saveDirty = true; }
 }
 
 function brewingTick(world, x, y, z, be) {

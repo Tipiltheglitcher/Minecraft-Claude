@@ -338,51 +338,41 @@ export class UI {
     this.statrows.style.visibility = survival ? 'visible' : 'hidden';
     this.xpWrap.style.visibility = survival ? 'visible' : 'hidden';
     if (survival) {
-      // cœurs
+      // cœurs, faim, armure, air : éléments réutilisés, seule l'image change (pas de reconstruction du DOM)
       const hp = Math.ceil(p.health);
       const poison = p.hasEffect('poison');
-      const hkey = hp + ':' + p.maxHealth + ':' + poison + ':' + Math.ceil(p.absorption) + ':' + (p.hurtTime > 0 && g.time % 4 < 2);
+      const hkey = hp + ':' + p.maxHealth + ':' + poison + ':' + Math.ceil(p.absorption) + ':' + (hp <= 4 && !g.paused);
       if (hkey !== this.hudCache.h) {
         this.hudCache.h = hkey;
-        this.heartRow.innerHTML = '';
         const full = poison ? 'heart_poison' : 'heart_full';
-        for (let i = 0; i < p.maxHealth / 2; i++) {
-          const img = el('div', 'hicon', this.heartRow);
-          const v = hp - i * 2;
-          img.style.backgroundImage = `url(${hudIcon(v >= 2 ? full : v === 1 ? 'heart_half' : 'heart_empty')})`;
-          if (hp <= 4 && !g.paused) img.classList.add('shake');
-        }
-        for (let i = 0; i < Math.ceil(p.absorption / 2); i++) {
-          const img = el('div', 'hicon', this.heartRow);
-          img.style.backgroundImage = `url(${hudIcon('heart_gold')})`;
-        }
+        const icons = [];
+        for (let i = 0; i < p.maxHealth / 2; i++) { const v = hp - i * 2; icons.push(v >= 2 ? full : v === 1 ? 'heart_half' : 'heart_empty'); }
+        for (let i = 0; i < Math.ceil(p.absorption / 2); i++) icons.push('heart_gold');
+        this.setIcons(this.heartRow, icons, hp <= 4 && !g.paused ? 'shake' : '');
       }
-      const fkey = p.food + ':' + p.hasEffect('hunger');
+      // clignotement des cœurs quand on est touché : simple classe CSS
+      const blink = p.hurtTime > 0 && g.time % 4 < 2;
+      if (blink !== this.hudCache.blink) { this.hudCache.blink = blink; this.heartRow.classList.toggle('blink', blink); }
+      const hunger = p.hasEffect('hunger');
+      const fkey = p.food + ':' + hunger;
       if (fkey !== this.hudCache.f) {
         this.hudCache.f = fkey;
-        this.foodRow.innerHTML = '';
-        for (let i = 0; i < 10; i++) {
-          const img = el('div', 'hicon', this.foodRow);
-          const v = p.food - i * 2;
-          img.style.backgroundImage = `url(${hudIcon(v >= 2 ? 'food_full' : v === 1 ? 'food_half' : 'food_empty')})`;
-          if (p.hasEffect('hunger')) img.style.filter = 'hue-rotate(60deg) saturate(0.6)';
-        }
+        const icons = [];
+        for (let i = 0; i < 10; i++) { const v = p.food - i * 2; icons.push(v >= 2 ? 'food_full' : v === 1 ? 'food_half' : 'food_empty'); }
+        this.setIcons(this.foodRow, icons, '');
+        this.foodRow.style.filter = hunger ? 'hue-rotate(60deg) saturate(0.6)' : '';
       }
       const ar = p.armorValue();
       if (ar !== this.hudCache.a) {
         this.hudCache.a = ar;
-        this.armorRow.innerHTML = '';
-        if (ar > 0) for (let i = 0; i < 10; i++) {
-          const img = el('div', 'hicon', this.armorRow);
-          const v = ar - i * 2;
-          img.style.backgroundImage = `url(${hudIcon(v >= 2 ? 'armor_full' : v === 1 ? 'armor_half' : 'armor_empty')})`;
-        }
+        const icons = [];
+        if (ar > 0) for (let i = 0; i < 10; i++) { const v = ar - i * 2; icons.push(v >= 2 ? 'armor_full' : v === 1 ? 'armor_half' : 'armor_empty'); }
+        this.setIcons(this.armorRow, icons, '');
       }
       const air = p.eyesInWater() || p.air < 300 ? Math.ceil((Math.max(0, p.air) * 10) / 300) : -1;
       if (air !== this.hudCache.air) {
         this.hudCache.air = air;
-        this.airRow.innerHTML = '';
-        for (let i = 0; i < air; i++) { const img = el('div', 'hicon', this.airRow); img.style.backgroundImage = `url(${hudIcon('bubble')})`; }
+        this.setIcons(this.airRow, new Array(Math.max(0, air)).fill('bubble'), '');
       }
       this.xpFill.style.width = p.xp * 100 + '%';
       this.xpLevel.textContent = p.xpLevel > 0 ? p.xpLevel : '';
@@ -417,6 +407,20 @@ export class UI {
     if (g.showDebug) this.updateDebug();
     // conteneur ouvert : rafraîchir (four...)
     if (this.screen && this.screen.tick) this.screen.tick();
+  }
+
+  // Met à jour une rangée d'icônes en réutilisant ses éléments
+  setIcons(row, names, cls) {
+    const kids = row.children;
+    while (kids.length < names.length) el('div', 'hicon', row);
+    for (let i = 0; i < kids.length; i++) {
+      const d = kids[i];
+      if (i >= names.length) { if (d.style.display !== 'none') d.style.display = 'none'; continue; }
+      if (d.style.display === 'none') d.style.display = '';
+      if (d._icon !== names[i]) { d._icon = names[i]; d.style.backgroundImage = `url(${hudIcon(names[i])})`; }
+      const c = 'hicon' + (cls ? ' ' + cls : '');
+      if (d.className !== c) d.className = c;
+    }
   }
 
   updateDebug() {

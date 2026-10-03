@@ -6,12 +6,9 @@ import { synth, synthLoop, variantCount, SOUND_NAMES, pianoNote, PIANO_RATE } fr
 // Ordre de pré-calcul : les sons les plus fréquents d'abord
 const PRIORITY = ['click', 'pop', 'mat_grass_step', 'mat_stone_step', 'mat_gravel_step', 'mat_wood_step', 'mat_sand_step', 'mat_grass', 'mat_stone', 'mat_gravel', 'mat_wood', 'player_hurt', 'eat', 'burp', 'xp', 'swim', 'splash'];
 const BIG = new Set(['explode', 'ghast', 'ghast_shoot', 'ghast_warn', 'ghast_death', 'levelup', 'portal_travel', 'thunder', 'end_portal', 'enderman_scream', 'cave']);
-// Gain de base par son (les échantillons sont tous normalisés)
-const GAIN = {
-  hiss: 0.6, fuse: 0.55, fire: 0.45, portal: 0.5, portal_travel: 0.6, explode: 1.1, thunder: 1.1, cave: 0.5,
-  click: 0.5, pop: 0.55, xp: 0.45, levelup: 0.6, toast: 0.55, challenge: 0.6, eat: 0.6, drink: 0.6,
-  blaze: 0.55, dragon_flap: 0.8, swim: 0.5, rain: 0.35, mat_cloth: 0.8, mat_cloth_step: 0.8, fizz: 0.5,
-};
+// Gain de base par son : les bruitages sont déjà mis au même niveau perçu (sfx.js) ;
+// seules les boucles d'ambiance ont un réglage propre
+const GAIN = { rain: 0.3, nether: 0.8, end: 0.8, underwater: 0.8 };
 
 export class Audio {
   constructor(game) {

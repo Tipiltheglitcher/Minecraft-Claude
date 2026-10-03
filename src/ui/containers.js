@@ -521,7 +521,7 @@ export class ChestScreen extends ContainerScreen {
   markModified() {
     if (!this.pos) return;
     const c = this.game.world.getChunk(this.pos.x >> 4, this.pos.z >> 4);
-    if (c) c.modified = true;
+    if (c) { c.modified = true; c.saveDirty = true; }
   }
   onClose() {
     if (this.pos) this.game.world.playSound('chest_close', this.pos.x + 0.5, this.pos.y + 0.5, this.pos.z + 0.5, 0.6);

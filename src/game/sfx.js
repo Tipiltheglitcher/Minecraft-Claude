@@ -36,6 +36,11 @@ class Biquad {
         const A = Math.pow(10, gain / 40);
         b0 = 1 + al * A; b1 = -2 * cs; b2 = 1 - al * A; a0 = 1 + al / A; a1 = -2 * cs; a2 = 1 - al / A; break;
       }
+      case 'hs': {
+        const A = Math.pow(10, gain / 40), sq = 2 * Math.sqrt(A) * al;
+        b0 = A * ((A + 1) + (A - 1) * cs + sq); b1 = -2 * A * ((A - 1) + (A + 1) * cs); b2 = A * ((A + 1) + (A - 1) * cs - sq);
+        a0 = (A + 1) - (A - 1) * cs + sq; a1 = 2 * ((A - 1) - (A + 1) * cs); a2 = (A + 1) - (A - 1) * cs - sq; break;
+      }
       default: b0 = (1 - cs) / 2; b1 = 1 - cs; b2 = b0; a0 = 1 + al; a1 = -2 * cs; a2 = 1 - al;
     }
     this.b0 = b0 / a0; this.b1 = b1 / a0; this.b2 = b2 / a0; this.a1 = a1 / a0; this.a2 = a2 / a0;
@@ -235,7 +240,8 @@ function voice(r, { dur, f0, formants, env, jitter = 0.01, breath = 0.05, fry = 
     if (tremolo) e *= 1 - tremolo * (0.5 + 0.5 * Math.sin(TAU * tremRate * i / RATE));
     out[i] = y * e;
   }
-  return fadeEdges(out, 0.003, 0.02);
+  filt(out, 'lp', 4200, 0.6);
+  return fadeEdges(out, 0.004, 0.02);
 }
 
 // Corde pincée (Karplus-Strong)
@@ -332,7 +338,7 @@ const MAT = {
   grass(r, step) {
     const dur = step ? 0.16 : 0.28;
     const out = buf(dur);
-    grains(out, r, { span: step ? 0.09 : 0.18, count: step ? 40 : 110, fmin: 1800, fmax: 7000, q: 2.5, dmin: 0.002, dmax: 0.008, amp: 1 });
+    grains(out, r, { span: step ? 0.09 : 0.18, count: step ? 40 : 110, fmin: 1200, fmax: 4800, q: 2.2, dmin: 0.003, dmax: 0.009, amp: 1 });
     const body = white(r, dur);
     filt(body, 'hp', 1200, 0.7);
     filt(body, 'lp', 5000, 0.7);
@@ -519,7 +525,7 @@ Object.assign(DEF, {
     return out;
   }],
   chicken_hurt: [2, (r) => voice(r, {
-    dur: 0.22, f0: (u) => 950 - 250 * u, jitter: 0.05, breath: 0.3, fry: 0.3,
+    dur: 0.22, f0: (u) => 760 - 200 * u, jitter: 0.05, breath: 0.3, fry: 0.3,
     formants: () => lerpF(V.a, V.i, 0.3, 1.5), env: (u) => Math.min(1, u * 25) * Math.pow(1 - u, 1.2),
   })],
   villager: [3, (r) => {
@@ -597,15 +603,15 @@ Object.assign(DEF, {
     return out;
   }],
   hiss: [1, (r) => {
-    const out = white(r, 1.5);
-    sweep(out, 'bp', (u) => 2500 + 2500 * u, 0.8);
-    filt(out, 'hp', 1500, 0.7);
+    const out = pink(r, 1.5);
+    sweep(out, 'bp', (u) => 1500 + 1300 * u, 0.9);
+    filt(out, 'hp', 700, 0.7);
     envelope(out, (u) => Math.pow(Math.min(1, u * 1.3), 1.5) * (u > 0.92 ? (1 - u) / 0.08 : 1));
     return out;
   }],
   fuse: [1, (r) => {
-    const out = white(r, 1.3);
-    filt(out, 'hp', 2800, 0.7);
+    const out = pink(r, 1.3);
+    filt(out, 'bp', 2200, 0.8);
     envelope(out, (u) => Math.min(1, u * 10) * (0.7 + 0.3 * Math.sin(u * 60)) * (u > 0.9 ? (1 - u) / 0.1 : 1));
     norm(out, 0.6);
     for (let k = 0; k < 30; k++) grain(out, r, r.range(0, 1.2), 0.003, r.range(3000, 7000), 1.5, r.range(0.3, 0.9));
@@ -660,10 +666,10 @@ Object.assign(DEF, {
   }],
   enderman_scream: [1, (r) => {
     const v = voice(r, {
-      dur: 1.1, f0: (u) => 650 + 250 * u, jitter: 0.06, breath: 0.4, vib: 0.08, vibRate: 14,
-      formants: () => lerpF(V.a, V.e, 0.5, 1.2), env: (u) => Math.min(1, u * 8) * Math.pow(1 - u, 0.7),
+      dur: 1.1, f0: (u) => 480 + 160 * u, jitter: 0.06, breath: 0.4, vib: 0.06, vibRate: 12,
+      formants: () => lerpF(V.a, V.e, 0.5, 1.05), env: (u) => Math.min(1, u * 6) * Math.pow(1 - u, 0.8),
     });
-    return saturate(norm(v), 2.5);
+    return saturate(norm(v), 1.4);
   }],
   teleport: [2, (r) => {
     const out = buf(0.5);
@@ -724,15 +730,15 @@ Object.assign(DEF, {
     return out;
   }],
   ghast: [3, (r) => {
-    const f = r.range(480, 620);
+    const f = r.range(380, 470);
     const out = voice(r, {
-      dur: r.range(1.3, 1.8), f0: (u) => f * (1 + 0.25 * Math.sin(Math.PI * u) - 0.35 * u * u), jitter: 0.02, breath: 0.2, vib: 0.03, vibRate: 5.5,
-      formants: (u) => lerpF(V.u, V.o, Math.sin(Math.PI * u), 1.3), env: (u) => Math.pow(Math.sin(Math.PI * Math.min(1, u * 1.1)), 1.2),
+      dur: r.range(1.3, 1.8), f0: (u) => f * (1 + 0.2 * Math.sin(Math.PI * u) - 0.3 * u * u), jitter: 0.02, breath: 0.25, vib: 0.025, vibRate: 5,
+      formants: (u) => lerpF(V.u, V.o, Math.sin(Math.PI * u), 1.1), env: (u) => Math.pow(Math.sin(Math.PI * Math.min(1, u * 1.1)), 1.5),
     });
     return out;
   }],
   ghast_hurt: [2, (r) => voice(r, {
-    dur: 0.6, f0: (u) => 900 - 300 * u, jitter: 0.04, breath: 0.3, vib: 0.05, vibRate: 12,
+    dur: 0.6, f0: (u) => 650 - 220 * u, jitter: 0.04, breath: 0.3, vib: 0.05, vibRate: 12,
     formants: () => lerpF(V.a, V.i, 0.5, 1.3), env: (u) => Math.min(1, u * 15) * Math.pow(1 - u, 1.2),
   })],
   ghast_death: [1, (r) => voice(r, {
@@ -740,7 +746,7 @@ Object.assign(DEF, {
     formants: (u) => lerpF(V.a, V.u, u, 1.3), env: (u) => Math.min(1, u * 10) * Math.pow(1 - u, 1),
   })],
   ghast_warn: [1, (r) => voice(r, {
-    dur: 0.9, f0: (u) => 700 + 500 * u, jitter: 0.03, breath: 0.25, vib: 0.06, vibRate: 13,
+    dur: 0.9, f0: (u) => 520 + 300 * u, jitter: 0.03, breath: 0.25, vib: 0.06, vibRate: 13,
     formants: () => lerpF(V.a, V.e, 0.4, 1.3), env: (u) => Math.min(1, u * 6) * Math.pow(1 - u, 0.8),
   })],
   ghast_shoot: [2, (r) => {
@@ -916,8 +922,8 @@ Object.assign(DEF, {
     return out;
   }],
   fizz: [2, (r) => {
-    const out = white(r, 0.7);
-    filt(out, 'hp', 2500, 0.7);
+    const out = pink(r, 0.7);
+    filt(out, 'bp', 1800, 0.7);
     envelope(out, (u) => Math.min(1, u * 30) * Math.pow(1 - u, 1.4));
     norm(out, 0.7);
     for (let k = 0; k < 40; k++) grain(out, r, r.range(0, 0.5), 0.003, r.range(3000, 8000), 2, r.range(0.2, 0.7));
@@ -1022,7 +1028,7 @@ Object.assign(DEF, {
     const out = buf(0.3);
     for (const t of [0, 0.12]) {
       const tmp = buf(0.1);
-      modal(tmp, strike(r, 0.001), [[r.range(3500, 4200), 0.03, 1], [r.range(6000, 7000), 0.02, 0.5]]);
+      modal(tmp, strike(r, 0.001), [[r.range(2400, 3000), 0.03, 1], [r.range(4200, 4800), 0.02, 0.4]]);
       mix(out, norm(tmp), 0.6, t);
       grain(out, r, t, 0.04, 5000, 1, 0.4);
     }
@@ -1198,10 +1204,10 @@ export const LOOPS = {
     return [0, 1].map((c) => {
       const rr = new Rand(r.next() * 1e9 + c);
       const ch = pink(rr, dur);
-      filt(ch, 'hp', 400, 0.7);
-      filt(ch, 'lp', 6000, 0.7);
-      norm(ch, 0.35);
-      for (let k = 0; k < 900; k++) grain(ch, rr, rr.range(0, dur), rr.range(0.002, 0.006), rr.range(1500, 7000), 1.2, rr.range(0.05, 0.3));
+      filt(ch, 'hp', 250, 0.7);
+      filt(ch, 'lp', 3200, 0.7);
+      norm(ch, 0.4);
+      for (let k = 0; k < 700; k++) grain(ch, rr, rr.range(0, dur), rr.range(0.003, 0.008), rr.range(900, 3500), 1.2, rr.range(0.04, 0.2));
       for (let k = 0; k < 40; k++) bubble(ch, rr, rr.range(0, dur), rr.range(0.5, 1), 0.05);
       return loopify(norm(ch, 0.8), 0.5);
     });
@@ -1304,21 +1310,80 @@ export function variantCount(name) {
   return DEF[name] ? DEF[name][0] : 0;
 }
 
+// ---------- sonie perçue ----------
+// Pondération proche de la courbe A (l'oreille est plus sensible entre 1 et 5 kHz),
+// puis valeur efficace maximale sur une fenêtre glissante de 100 ms. Résultat en dB.
+export function loudness(ch) {
+  const hp1 = new Biquad('hp', 400, 0.5), hp2 = new Biquad('hp', 120, 0.7), lp = new Biquad('lp', 9000, 0.7);
+  const win = Math.min(ch.length, Math.floor(0.1 * RATE));
+  const sq = new Float32Array(ch.length);
+  for (let i = 0; i < ch.length; i++) { const a = lp.p(hp2.p(hp1.p(ch[i]))); sq[i] = a * a; }
+  let acc = 0, best = 0;
+  for (let i = 0; i < ch.length; i++) {
+    acc += sq[i];
+    if (i >= win) acc -= sq[i - win];
+    if (acc > best) best = acc;
+  }
+  return 20 * Math.log10(Math.sqrt(best / Math.max(1, win)) + 1e-9);
+}
+
+// Part d'énergie au-dessus de 3,5 kHz (dureté)
+export function harshness(ch) {
+  const hp = new Biquad('hp', 3500, 0.7);
+  let hi = 0, all = 0;
+  for (let i = 0; i < ch.length; i++) { const h = hp.p(ch[i]); hi += h * h; all += ch[i] * ch[i]; }
+  return hi / (all + 1e-12);
+}
+
+// Sonie visée par son (dB) : les cris aigus, sifflements et sons d'interface sont plus discrets
+const TARGET = {
+  click: -27, pop: -23, xp: -25, ding: -24, levelup: -21, toast: -22, challenge: -21, enchant: -25, brew: -24, anvil: -21,
+  hiss: -24, fuse: -26, fizz: -26, fire: -28, ignite: -24, portal: -26, portal_travel: -22, end_portal: -18, cave: -24, eye_place: -22,
+  explode: -15, thunder: -16, fall_big: -19, fall_small: -22, splash: -21, swim: -25, drink: -23, eat: -23, burp: -23, milk: -23,
+  ghast: -23, ghast_warn: -23, ghast_hurt: -22, ghast_death: -22, ghast_shoot: -20,
+  enderman: -24, enderman_scream: -24, enderman_hurt: -22, enderman_death: -22, teleport: -23,
+  chicken: -24, chicken_hurt: -23, pig: -22, pig_hurt: -22, sheep: -22, cow: -21, cow_hurt: -21, villager: -23, villager_hurt: -22,
+  glass: -21, shear: -25, bow: -22, arrow_hit: -21, item_break: -21, spider: -23, spider_death: -22, creeper_hurt: -22,
+  dragon_growl: -17, dragon_death: -16, dragon_flap: -19, dragon_hurt: -18, dragon_shoot: -19, dragon_breath: -21,
+  player_hurt: -19, blaze: -24, golem_attack: -20,
+};
+function targetFor(name) {
+  if (TARGET[name] !== undefined) return TARGET[name];
+  if (name.endsWith('_step')) return -21;
+  if (name.startsWith('mat_')) return -19;
+  return -21;
+}
+
+// Adoucit et met au même niveau perçu : passe-bas, aigus atténués selon la dureté,
+// attaques adoucies, gain calculé sur la sonie, crête plafonnée.
+function finish(name, chans) {
+  const hard = harshness(chans[0]);
+  for (const c of chans) {
+    filt(c, 'lp', 8000, 0.6);
+    if (hard > 0.15) {
+      const b = new Biquad('hs', 3000, 0.707, -Math.min(9, 4 + hard * 10));
+      for (let i = 0; i < c.length; i++) c[i] = b.p(c[i]);
+    }
+    fadeEdges(c, 0.0015, 0.012);
+  }
+  let L = -200;
+  for (const c of chans) L = Math.max(L, loudness(c));
+  let g = Math.pow(10, (targetFor(name) - L) / 20);
+  let m = 0;
+  for (const c of chans) m = Math.max(m, peak(c));
+  if (m * g > 0.85) g = 0.85 / m;
+  for (const c of chans) for (let i = 0; i < c.length; i++) c[i] *= g;
+  return chans;
+}
+
 // Renvoie { channels: [Float32Array...], rate }
 export function synth(name, variant) {
   const d = DEF[name];
   if (!d) return null;
   const r = new Rand(((hashName(name) * 31 + variant * 977) >>> 0) + 1);
-  let res = d[1](r);
+  const res = d[1](r);
   const chans = Array.isArray(res) ? res : [res];
-  // normalisation commune : même crête pour tous les canaux
-  let m = 0;
-  for (const c of chans) m = Math.max(m, peak(c));
-  for (const c of chans) {
-    if (m > 0) for (let i = 0; i < c.length; i++) c[i] *= 0.9 / m;
-    fadeEdges(c, 0.0005, 0.01);
-  }
-  return { channels: chans, rate: RATE };
+  return { channels: finish(name, chans), rate: RATE };
 }
 
 export function synthLoop(name) {

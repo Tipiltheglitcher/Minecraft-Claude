@@ -236,3 +236,4 @@ button.opt { background: #6f6f6f linear-gradient(#8a8a8a, #626262); color: #e0e0
 .btn.keybtn.conflict { color: #ff5555; }
 .btn.keybtn.wait { color: #ffff55; background: #3a3a3a; }
 .btn.opt.wide { grid-column: 1 / -1; }
+.icons.blink .hicon { filter: brightness(1.9) saturate(0.6); }
