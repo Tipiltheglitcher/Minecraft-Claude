@@ -213,6 +213,22 @@ export class Interaction {
     }
   }
 
+  // ---------- Écran tactile ----------
+  // Action d'un appui sur la zone de visée : appui long (hold) = miner ou utiliser en continu
+  // (manger, boire, arc) ; appui bref = frapper la créature visée, sinon poser / utiliser
+  touchAction(hold) {
+    const g = this.game, p = this.player;
+    const held = p ? p.inventory.selected() : null;
+    const def = held ? ITEMS[held.id] : null;
+    if (hold) return def && (def.food || def.use === 'drink' || def.use === 'milk' || held.id === I.bow) ? 'use' : 'break';
+    const te = g.targetEntity && g.targetEntity.entity;
+    if (te) {
+      const interactive = te.type === 'villager' || !!(held && (held.id === I.shears || held.id === I.bucket || def.use === 'spawn_egg' || (te.isFood && te.isFood(held.id))));
+      return interactive ? 'use' : 'attack';
+    }
+    return 'use';
+  }
+
   // ---------- Clic droit ----------
   use() {
     const g = this.game, p = this.player, w = this.world;

@@ -91,7 +91,8 @@ export class ContainerScreen {
     this.slots = [];
     this.root = el('div', 'panel container ' + cls);
     if (title) el('div', 'ptitle', this.root, title);
-    this.dragSlots = null;
+    this.drag = null;
+    this.lastPick = null;
   }
 
   get cursor() { return this.ui.cursor; }
@@ -100,11 +101,15 @@ export class ContainerScreen {
   slot(parent, spec) {
     const div = el('div', 'slot' + (spec.cls ? ' ' + spec.cls : ''), parent);
     spec.el = div;
+    div._slot = spec;
     if (spec.bg) div.style.setProperty('--bg', `url(${iconURL(spec.bg)})`), div.classList.add('hasbg');
     div.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); this.onDown(spec, e); });
-    div.addEventListener('mouseenter', () => { this.hover = spec; this.onEnter(spec); });
+    div.addEventListener('mouseenter', (e) => { this.hover = spec; this.onEnter(spec, e); });
     div.addEventListener('mouseleave', () => { if (this.hover === spec) this.hover = null; });
-    div.addEventListener('dblclick', (e) => { e.preventDefault(); this.collect(spec); });
+    div.addEventListener('touchstart', (e) => this.onTouchStart(spec, e), { passive: false });
+    div.addEventListener('touchmove', (e) => this.onTouchMove(e), { passive: false });
+    div.addEventListener('touchend', (e) => this.onTouchEnd(e), { passive: false });
+    div.addEventListener('touchcancel', (e) => this.onTouchEnd(e), { passive: false });
     this.slots.push(spec);
     return spec;
   }
@@ -125,74 +130,151 @@ export class ContainerScreen {
   }
 
   // ----- clics -----
+  // La pile du curseur peut-elle être déposée ici (case vide ou même objet pas plein) ?
+  canDrop(sl, cs) {
+    if (sl.output || (sl.accept && !sl.accept(cs))) return false;
+    const cur = sl.get();
+    return !cur || (sameItem(cur, cs) && cur.count < Math.min(stackMax(cur), sl.max || 64));
+  }
+
   onDown(sl, e) {
-    const shift = e.shiftKey;
+    if (e.button !== 0 && e.button !== 2) return;
+    const shift = e.shiftKey || !!this.quickMode;
     const right = e.button === 2;
+    const now = performance.now();
     this.game.audio.ui('click');
     if (sl.output) { this.takeOutput(sl, shift); this.changed(); return; }
+    // double-clic gauche juste après avoir pris une pile : rassembler les objets identiques
+    const pick = this.lastPick;
+    this.lastPick = null;
+    if (!right && !shift && pick && pick.sl === sl && now - pick.t < 300 && this.cursor) { this.collect(); return; }
     if (shift) { this.quickMove(sl); this.changed(); return; }
     const cur = sl.get();
     const cs = this.cursor;
-    if (cs && !cur && (e.button === 0 || right)) {
-      // début de glisser-déposer
-      this.dragSlots = { button: e.button, list: [sl] };
+    if (cs && this.canDrop(sl, cs)) {
+      // glisser-déposer comme dans Minecraft : clic gauche maintenu = répartir la pile à parts égales,
+      // clic droit maintenu = un objet dans chaque case survolée
+      this.drag = { button: e.button, start: cloneStack(cs), list: [{ sl, orig: cloneStack(cur) }] };
+      this.applyDrag();
+      this.changed();
+      return;
     }
-    if (!right) {
-      if (!cs) { if (cur) { this.cursor = cur; sl.set(null); } }
-      else if (!cur) { if (!sl.accept || sl.accept(cs)) { const max = Math.min(stackMax(cs), sl.max || 64); const n = Math.min(cs.count, max); sl.set(cloneStack(cs, n)); cs.count -= n; this.cursor = cs.count > 0 ? cs : null; } }
-      else if (sameItem(cur, cs)) {
-        const max = Math.min(stackMax(cur), sl.max || 64);
-        const n = Math.min(cs.count, max - cur.count);
-        cur.count += n; cs.count -= n;
-        sl.set(cur);
-        this.cursor = cs.count > 0 ? cs : null;
-      } else if (!sl.accept || sl.accept(cs)) { sl.set(cs); this.cursor = cur; }
-    } else {
-      if (!cs) { if (cur) { const h = Math.ceil(cur.count / 2); this.cursor = cloneStack(cur, h); cur.count -= h; sl.set(cur.count > 0 ? cur : null); } }
-      else if (!cur) { if (!sl.accept || sl.accept(cs)) { sl.set(cloneStack(cs, 1)); cs.count--; this.cursor = cs.count > 0 ? cs : null; } }
-      else if (sameItem(cur, cs) && cur.count < Math.min(stackMax(cur), sl.max || 64)) { cur.count++; cs.count--; sl.set(cur); this.cursor = cs.count > 0 ? cs : null; }
-      else if (!sl.accept || sl.accept(cs)) { sl.set(cs); this.cursor = cur; }
+    if (!cs) {
+      if (cur && !right) { this.cursor = cur; sl.set(null); this.lastPick = { sl, t: now }; }
+      else if (cur) { const h = Math.ceil(cur.count / 2); this.cursor = cloneStack(cur, h); cur.count -= h; sl.set(cur.count > 0 ? cur : null); }
+    } else if (!(cur && sameItem(cur, cs)) && (!sl.accept || sl.accept(cs))) {
+      // objet différent : échange
+      sl.set(cs); this.cursor = cur;
     }
     this.changed();
   }
 
-  onEnter(sl) {
-    const d = this.dragSlots;
-    if (!d || !this.ui.mouseDown) return;
-    if (d.list.includes(sl)) return;
-    const cs = this.cursor;
-    if (!cs || sl.output || sl.get() || (sl.accept && !sl.accept(cs))) return;
-    d.list.push(sl);
-    if (d.button === 2) {
-      sl.set(cloneStack(cs, 1));
-      cs.count--;
-      this.cursor = cs.count > 0 ? cs : null;
-      if (!this.cursor) this.dragSlots = null;
-      this.changed();
+  // Répartit la pile de départ du glisser sur les cases survolées (recalculé depuis l'état initial)
+  applyDrag() {
+    const d = this.drag;
+    for (const it of d.list) it.sl.set(cloneStack(it.orig));
+    const cs = cloneStack(d.start);
+    const per = d.button === 2 ? 1 : d.list.length === 1 ? cs.count : Math.floor(cs.count / d.list.length);
+    for (const it of d.list) {
+      if (cs.count <= 0) break;
+      const cur = it.sl.get();
+      const room = Math.min(stackMax(cs), it.sl.max || 64) - (cur ? cur.count : 0);
+      const n = Math.min(per, room, cs.count);
+      if (n <= 0) continue;
+      if (cur) { cur.count += n; it.sl.set(cur); } else it.sl.set(cloneStack(cs, n));
+      cs.count -= n;
     }
+    this.cursor = cs.count > 0 ? cs : null;
+  }
+
+  onEnter(sl, e) {
+    const d = this.drag;
+    if (!d) return;
+    // bouton relâché hors de la fenêtre : fin du glisser
+    if (!(e.buttons & (d.button === 2 ? 2 : 1))) { this.drag = null; return; }
+    if (d.list.some((it) => it.sl === sl)) return;
+    if (d.list.length >= d.start.count || !this.canDrop(sl, d.start)) return;
+    d.list.push({ sl, orig: cloneStack(sl.get()) });
+    this.applyDrag();
+    this.changed();
   }
 
   onUp() {
-    const d = this.dragSlots;
-    this.dragSlots = null;
-    if (!d || d.button !== 0 || d.list.length < 2) return;
-    // répartition égale : la 1re case a déjà reçu toute la pile
-    const first = d.list[0];
-    const s = first.get();
-    if (!s) return;
-    const total = s.count + (this.cursor && sameItem(this.cursor, s) ? this.cursor.count : 0);
-    const per = Math.floor(total / d.list.length);
-    if (per < 1) return;
-    let left = total;
-    for (const sl of d.list) {
-      sl.set(cloneStack(s, per));
-      left -= per;
-    }
-    this.cursor = left > 0 ? cloneStack(s, left) : null;
-    this.changed();
+    this.drag = null;
   }
 
-  collect(sl) {
+  // ----- tactile -----
+  // appui bref = clic gauche ; appui long = clic droit (prendre la moitié / déposer un objet) ;
+  // glisser avec un objet en main = un objet par case survolée ; glisser depuis une pile = la déplacer
+  onTouchStart(sl, e) {
+    e.preventDefault(); e.stopPropagation();
+    if (this.touchSt) return;
+    const t = e.changedTouches[0];
+    const st = this.touchSt = { id: t.identifier, sl, fired: false, carry: false, over: null };
+    this.hover = sl;
+    [this.ui.mx, this.ui.my] = this.ui.toGame(t.clientX, t.clientY);
+    if (!this.cursor) this.ui.showTooltip(sl.get());
+    st.timer = setTimeout(() => {
+      if (this.touchSt !== st || st.fired) return;
+      st.fired = true;
+      this.ui.showTooltip(null);
+      this.onDown(sl, { button: 2, shiftKey: false });
+      try { navigator.vibrate && navigator.vibrate(10); } catch (err) { /* facultatif */ }
+    }, 350);
+  }
+
+  touchSlotAt(e) {
+    const st = this.touchSt;
+    const t = st && [...e.changedTouches].find((x) => x.identifier === st.id);
+    if (!t) return undefined;
+    [this.ui.mx, this.ui.my] = this.ui.toGame(t.clientX, t.clientY);
+    if (this.ui.cursorEl) { this.ui.cursorEl.style.left = this.ui.mx + 'px'; this.ui.cursorEl.style.top = this.ui.my + 'px'; }
+    const hit = document.elementFromPoint(t.clientX, t.clientY);
+    const d = hit && hit.closest('.slot');
+    return (d && d._slot && this.slots.includes(d._slot)) ? d._slot : null;
+  }
+
+  onTouchMove(e) {
+    const st = this.touchSt;
+    if (!st) return;
+    e.preventDefault();
+    const target = this.touchSlotAt(e);
+    if (target === undefined || !target || (target === st.sl && !st.fired)) return;
+    this.ui.showTooltip(null);
+    if (!st.fired) {
+      clearTimeout(st.timer);
+      st.fired = true;
+      if (this.cursor) {
+        // objet en main : un par case, comme le clic droit maintenu
+        this.onDown(st.sl, { button: 2, shiftKey: false });
+      } else if (st.sl.get() && !st.sl.output) {
+        // pas d'objet en main : on emporte la pile et on la pose là où le doigt se lève
+        this.onDown(st.sl, { button: 0, shiftKey: false });
+        this.lastPick = null;
+        st.carry = true;
+      }
+    }
+    if (st.carry) st.over = target;
+    else if (this.drag) this.onEnter(target, { buttons: 2 });
+  }
+
+  onTouchEnd(e) {
+    const st = this.touchSt;
+    if (!st || ![...e.changedTouches].some((t) => t.identifier === st.id)) return;
+    e.preventDefault();
+    clearTimeout(st.timer);
+    this.touchSt = null;
+    this.ui.showTooltip(null);
+    if (st.carry) {
+      const dest = st.over && !st.over.output ? st.over : st.sl;
+      if (this.cursor) this.onDown(dest, { button: 0, shiftKey: false });
+      if (this.cursor && dest !== st.sl && !st.sl.get()) this.onDown(st.sl, { button: 0, shiftKey: false });
+      this.lastPick = null;
+    } else if (!st.fired) this.onDown(st.sl, { button: 0, shiftKey: false });
+    this.onUp();
+  }
+
+  collect() {
     const cs = this.cursor;
     if (!cs) return;
     const max = stackMax(cs);

@@ -28,13 +28,26 @@ Le jeu se **termine** comme l'original : on survit, on part dans le Nether cherc
 | L | Progrès |
 | C | Zoom |
 | F1 / F2 / F3 / F5 | Masquer l'interface / capture / débogage / vue à la 3e personne |
-| Échap | Pause, options, guide (depuis l'inventaire, un coffre ou le chat : ferme et met en pause) |
+| Échap | Pause, options, guide ; dans l'inventaire, un coffre, la table de craft ou le chat : ferme la fenêtre et revient au jeu |
 
 **Toutes les touches se changent** dans *Options → Commandes*, y compris les boutons de la souris (clic, molette, boutons latéraux). Les conflits s'affichent en rouge. S'accroupir et sprinter peuvent passer en mode « basculer ».
 
-Dans l'inventaire : Maj+clic pour un déplacement rapide, clic droit pour prendre la moitié ou déposer un par un, glisser pour répartir, double-clic pour rassembler, touches 1-9 pour échanger avec la barre d'action. Le **livre de recettes** (à gauche) liste toutes les recettes et les place dans la grille d'un clic.
+Dans l'inventaire (comme dans Minecraft) : Maj+clic pour un déplacement rapide, clic droit pour prendre la moitié ou déposer un par un, **clic droit maintenu en glissant pour déposer un objet dans chaque case survolée**, clic gauche maintenu en glissant pour répartir la pile à parts égales, double-clic pour rassembler, touches 1-9 pour échanger avec la barre d'action. Le **livre de recettes** (à gauche) liste toutes les recettes et les place dans la grille d'un clic.
 
-Si le navigateur refuse le verrouillage de la souris (page intégrée dans une autre), maintenez un bouton de la souris enfoncé et déplacez-la pour regarder autour de vous. Des commandes tactiles de base existent sur mobile.
+Si le navigateur refuse le verrouillage de la souris (page intégrée dans une autre), maintenez un bouton de la souris enfoncé et déplacez-la pour regarder autour de vous.
+
+**Sur téléphone / tablette** (commandes à la Minecraft Bedrock, alignées automatiquement sans chevaucher la barre d'action). Le jeu s'affiche toujours **en paysage** : au premier appui il passe en plein écran (la barre d'adresse disparaît) et verrouille l'orientation quand le navigateur le permet (Android) ; sinon, si le téléphone est tenu en portrait, l'affichage est tourné d'un quart de tour. Sur iPhone, Safari n'a pas de plein écran : utilisez Partager → « Sur l'écran d'accueil » et lancez le jeu depuis l'icône (plein écran, sans barre d'adresse). Pour cela, gardez `manifest.webmanifest`, `icon-192.png` et `icon-512.png` à côté de `minecraft.html` sur le site.
+
+| Geste | Action |
+| --- | --- |
+| Pouce gauche | Joystick qui apparaît sous le doigt ; poussé à fond vers l'avant : sprint |
+| Glisser à droite | Regarder autour de soi |
+| Appui bref à droite | Frapper la créature visée, sinon poser / utiliser / ouvrir |
+| Doigt immobile à droite (0,35 s) | Miner le bloc visé tant que le doigt reste posé (frappe répétée sur une créature ; manger, boire ou bander l'arc si on tient cet objet) |
+| ⤒ / ⇩ / ⇣ | Sauter (double appui : voler en créatif) / s'accroupir (bascule) / jeter un objet |
+| Barre d'action | Toucher une case pour la choisir, appui long pour jeter un objet |
+| 🎒 💬 ⛶ ⏸ | Inventaire, chat, plein écran, pause |
+| Inventaire | Appui bref : prendre / poser ; appui long : prendre la moitié ou poser un objet ; glisser avec un objet en main : un objet par case ; glisser une pile : la déplacer ; ⇄ : déplacement rapide ; ✕ : fermer |
 
 ## Contenu
 

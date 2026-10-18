@@ -14,6 +14,17 @@ import { SHADER_PRESETS } from '../gfx/fancy.js';
 
 const SPLASHES = ['Édition JavaScript !', '100 % procédural !', 'Aussi en français !', 'Terminez le jeu !', 'Méfiez-vous des Creepers !', 'Ne regardez pas les Endermen !', 'Des cubes partout !', 'Fait avec WebGL2 !', 'Sans aucune image !', 'Le dragon vous attend...'];
 
+// Icônes des boutons tactiles (SVG : parfaitement centrées, contrairement aux symboles du texte)
+const TICON = {
+  jump: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 3l8 9h-5v8H9v-8H4z"/></svg>',
+  sneak: '<svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 21l8-9h-5V4H9v8H4z"/></svg>',
+  drop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11M7 10l5 5 5-5M5 20h14"/></svg>',
+  inv: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/><rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/></svg>',
+  chat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"><path d="M4 4h16v12H10l-6 4z"/></svg>',
+  pause: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>',
+  full: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg>',
+};
+
 export class UI {
   constructor(game, root) {
     this.game = game;
@@ -23,14 +34,17 @@ export class UI {
     this.cursor = null;
     this.mouseDown = false;
     this.chatLines = [];
+    this._touchFrames = 0;
     this.chatHistory = [];
     this.chatHistIdx = -1;
     this.toastQueue = [];
     this.hudCache = {};
     this.build();
+    this.updateRotation();
+    window.addEventListener('resize', () => this.updateRotation());
     window.addEventListener('mousemove', (e) => {
-      this.mx = e.clientX; this.my = e.clientY;
-      if (this.cursorEl) { this.cursorEl.style.left = e.clientX + 'px'; this.cursorEl.style.top = e.clientY + 'px'; }
+      [this.mx, this.my] = this.toGame(e.clientX, e.clientY);
+      if (this.cursorEl) { this.cursorEl.style.left = this.mx + 'px'; this.cursorEl.style.top = this.my + 'px'; }
       if (this.tooltipEl && this.tooltipEl.style.display !== 'none') this.placeTooltip();
     });
     window.addEventListener('mousedown', (e) => {
@@ -97,21 +111,209 @@ export class UI {
     this.hud.style.display = 'none';
   }
 
+  // ---------- commandes tactiles ----------
   buildTouch() {
-    if (!('ontouchstart' in window)) return;
-    const mk = (label, cls, down, up) => {
-      const b = el('div', 'tbtn ' + cls, this.touchEl, label);
-      b.addEventListener('touchstart', (e) => { e.preventDefault(); e.stopPropagation(); down(); }, { passive: false });
-      b.addEventListener('touchend', (e) => { e.preventDefault(); e.stopPropagation(); up && up(); }, { passive: false });
+    if (!('ontouchstart' in window) && !(navigator.maxTouchPoints > 0)) return;
+    const inp = this.game.input;
+    const tb = this.tb = {};
+    const mk = (name, down, up) => {
+      const b = el('div', 'tbtn t' + name, this.touchEl);
+      b.innerHTML = TICON[name];
+      b.addEventListener('touchstart', (e) => { e.preventDefault(); e.stopPropagation(); inp.touch.lastTouch = performance.now(); this.game.audio.init(); b.classList.add('down'); down(); }, { passive: false });
+      const end = (e) => { e.preventDefault(); e.stopPropagation(); b.classList.remove('down'); up && up(); };
+      b.addEventListener('touchend', end, { passive: false });
+      b.addEventListener('touchcancel', end, { passive: false });
+      tb[name] = b;
       return b;
     };
-    const inp = this.game.input;
-    mk('⤒', 'tjump', () => inp.keys.add(inp.binds.jump), () => inp.keys.delete(inp.binds.jump));
-    mk('⇩', 'tsneak', () => { const k = inp.binds.sneak; if (inp.keys.has(k)) inp.keys.delete(k); else inp.keys.add(k); });
-    mk('⛏', 'tbreak', () => { inp.mouse.left = true; }, () => { inp.mouse.left = false; });
-    mk('✋', 'tuse', () => { inp.mouse.right = true; inp.clicked.right = true; }, () => { inp.mouse.right = false; });
-    mk('🎒', 'tinv', () => this.openInventory());
-    mk('⏸', 'tpause', () => this.openPause());
+    mk('jump', () => inp.press(inp.binds.jump, true), () => inp.press(inp.binds.jump, false));
+    mk('sneak', () => { const k = inp.binds.sneak; const on = !inp.keys.has(k); inp.press(k, on); tb.sneak.classList.toggle('on', on); });
+    mk('drop', () => this.game.interaction.dropSelected(false));
+    mk('inv', () => this.openInventory());
+    mk('chat', () => this.openChat(''));
+    mk('pause', () => this.openPause());
+    if (this.canFullscreen()) mk('full', () => { if (this.isFullscreen()) { this.noAutoFull = true; this.exitFullscreen(); } else { this.noAutoFull = false; this.enterFullscreen(); } });
+    // joystick (apparaît sous le pouce) et indicateur d'appui long
+    this.joyBase = el('div', 'tjoy', this.touchEl);
+    this.joyKnob = el('div', 'tknob', this.joyBase);
+    this.ringEl = el('div', 'tring', this.touchEl);
+    // barre d'action : toucher une case la sélectionne, appui long = jeter un objet
+    this.hotSlots.forEach((d, i) => {
+      let timer = 0;
+      d.addEventListener('touchstart', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        inp.touch.lastTouch = performance.now();
+        const p = this.game.player;
+        if (!p || this.game.state !== 'playing') return;
+        p.inventory.sel = i; p.inventory.changed();
+        clearTimeout(timer);
+        timer = setTimeout(() => this.game.interaction.dropSelected(false), 600);
+      }, { passive: false });
+      const end = (e) => { e.preventDefault(); clearTimeout(timer); };
+      d.addEventListener('touchend', end, { passive: false });
+      d.addEventListener('touchcancel', end, { passive: false });
+    });
+    // marges des encoches et bords arrondis (env(safe-area-inset-*))
+    this.safeProbe = el('div', 'safeprobe', document.body);
+    // plein écran automatique au premier appui (cache la barre d'adresse) puis paysage forcé
+    document.addEventListener('touchend', () => {
+      if (this.touchMode && !this.noAutoFull && !this.isFullscreen()) this.enterFullscreen();
+    }, true);
+    const relayout = () => { this.updateRotation(); this.layoutTouch(); };
+    window.addEventListener('resize', relayout);
+    window.addEventListener('orientationchange', () => setTimeout(relayout, 250));
+    document.addEventListener('fullscreenchange', () => setTimeout(relayout, 100));
+    document.addEventListener('webkitfullscreenchange', () => setTimeout(relayout, 100));
+    this.setTouchMode(matchMedia('(pointer: coarse)').matches);
+  }
+
+  canFullscreen() {
+    const r = document.documentElement;
+    return !!(r.requestFullscreen || r.webkitRequestFullscreen);
+  }
+
+  isFullscreen() {
+    return !!(document.fullscreenElement || document.webkitFullscreenElement);
+  }
+
+  enterFullscreen() {
+    const r = document.documentElement;
+    const req = r.requestFullscreen || r.webkitRequestFullscreen;
+    if (!req) return;
+    let pr;
+    try { pr = req.call(r, { navigationUI: 'hide' }); } catch (e) { return; }
+    const lock = () => { try { const o = screen.orientation; if (o && o.lock) o.lock('landscape').catch(() => {}); } catch (e) { /* non pris en charge */ } };
+    if (pr && pr.then) pr.then(lock).catch(() => {}); else lock();
+  }
+
+  exitFullscreen() {
+    const f = document.exitFullscreen || document.webkitExitFullscreen;
+    if (f) { try { const r = f.call(document); if (r && r.catch) r.catch(() => {}); } catch (e) { /* ignoré */ } }
+  }
+
+  setTouchMode(on) {
+    if (!this.tb || this.touchMode === on) return;
+    this.touchMode = on;
+    this.root.classList.toggle('touchmode', on);
+    this._touchShown = undefined;
+    this.updateRotation();
+    this.layoutTouch();
+  }
+
+  // Téléphone tenu en portrait (rotation automatique désactivée, ou paysage impossible à verrouiller) :
+  // tout le jeu est tourné d'un quart de tour pour s'afficher en paysage
+  updateRotation() {
+    const rot = !!this.touchMode && window.innerHeight > window.innerWidth;
+    if (rot !== this.rotated) {
+      this.rotated = rot;
+      document.documentElement.classList.toggle('rot', rot);
+    }
+    const st = document.documentElement.style;
+    st.setProperty('--sw', window.innerWidth + 'px');
+    st.setProperty('--sh', window.innerHeight + 'px');
+    document.documentElement.classList.toggle('narrow', this.viewW() < 700);
+  }
+
+  // Taille et coordonnées dans le repère du jeu (différent de l'écran quand il est tourné)
+  viewW() { return this.rotated ? window.innerHeight : window.innerWidth; }
+  viewH() { return this.rotated ? window.innerWidth : window.innerHeight; }
+  toGame(x, y) { return this.rotated ? [y, window.innerWidth - x] : [x, y]; }
+
+  // Marges de sécurité (encoche, barre d'accueil) dans le repère du jeu
+  safeInsets() {
+    const z = { l: 0, r: 0, t: 0, b: 0 };
+    if (!this.safeProbe) return z;
+    const cs = getComputedStyle(this.safeProbe);
+    const t = parseFloat(cs.paddingTop) || 0, r = parseFloat(cs.paddingRight) || 0, b = parseFloat(cs.paddingBottom) || 0, l = parseFloat(cs.paddingLeft) || 0;
+    // tourné d'un quart de tour : haut de l'écran = gauche du jeu, droite de l'écran = haut du jeu...
+    return this.rotated ? { l: t, t: r, r: b, b: l } : { l, r, t, b };
+  }
+
+  // Place les boutons en grille alignée, sans chevaucher la barre d'action ni les cœurs
+  layoutTouch() {
+    if (!this.tb || !this.touchMode) return;
+    const W = this.viewW(), H = this.viewH();
+    const ins = this.safeInsets();
+    document.documentElement.style.setProperty('--safe-b', ins.b + 'px');
+    const s = Math.round(Math.max(48, Math.min(72, Math.min(W, H) * 0.15)));
+    const ss = Math.round(s * 0.8);
+    const g = Math.round(s * 0.22), m = Math.max(12, Math.round(s * 0.25));
+    const L = m + ins.l, Rm = m + ins.r, T = m + ins.t, Bm = m + ins.b;
+    // barre d'action : centrée en bas (repère du jeu, indépendant de la rotation)
+    const hb = this.hotbar.parentElement;
+    const hudW = hb.offsetWidth, hudH = hb.offsetHeight + ins.b;
+    const hudL = (W - hudW) / 2, hudR = hudL + hudW;
+    const R = this.joyRadius = Math.round(s * 0.95);
+    const pos = (b, size, x, y) => {
+      if (!b) return;
+      Object.assign(b.style, { width: size + 'px', height: size + 'px', left: Math.round(x) + 'px', top: Math.round(y) + 'px', right: '', bottom: '' });
+    };
+    const tb = this.tb;
+    // bas à droite : [s'accroupir] [sauter] sur la même ligne, [jeter] centré au-dessus de [sauter]
+    const clusterW = 2 * s + g;
+    const baseY = (W - hudR >= clusterW + Rm + m ? H - Bm : H - hudH - m) - s;
+    const jx = W - Rm - s;
+    pos(tb.jump, s, jx, baseY);
+    pos(tb.sneak, s, jx - g - s, baseY);
+    pos(tb.drop, ss, jx + (s - ss) / 2, baseY - g - ss);
+    // haut : pause à gauche ; inventaire, chat, plein écran alignés à droite
+    pos(tb.pause, ss, L, T);
+    let x = W - Rm - ss;
+    for (const k of ['inv', 'chat', 'full']) { if (tb[k]) { pos(tb[k], ss, x, T); x -= ss + g; } }
+    this.effectsEl.style.top = T + ss + m + 'px';
+    // position de repos du joystick
+    this.joyHome = { x: L + R, y: (hudL >= 2 * R + L + m ? H - Bm : H - hudH - m) - R };
+    Object.assign(this.joyBase.style, { width: 2 * R + 'px', height: 2 * R + 'px' });
+    const k = Math.round(R * 0.9);
+    Object.assign(this.joyKnob.style, { width: k + 'px', height: k + 'px' });
+    this.ringEl.style.width = this.ringEl.style.height = Math.round(s * 1.1) + 'px';
+    if (this.game.input.touch.moveId === null) this.joystick(null);
+  }
+
+  joystick(x, y, dx = 0, dy = 0, sprint = false) {
+    if (!this.joyBase) return;
+    const R = this.joyRadius || 50;
+    const idle = x === null;
+    if (idle) { if (!this.joyHome) return; x = this.joyHome.x; y = this.joyHome.y; }
+    this.joyBase.style.transform = `translate(${x - R}px, ${y - R}px)`;
+    this.joyKnob.style.transform = `translate(-50%, -50%) translate(${dx * R}px, ${dy * R}px)`;
+    this.joyBase.classList.toggle('idle', idle);
+    this.joyBase.classList.toggle('sprint', sprint);
+  }
+
+  touchRing(x, y, mode) {
+    const r = this.ringEl;
+    if (!r) return;
+    if (mode === 'hide') { r.classList.remove('press', 'hold'); return; }
+    r.style.left = x + 'px'; r.style.top = y + 'px';
+    if (mode === 'show') { r.classList.remove('press', 'hold'); void r.offsetWidth; r.classList.add('press'); }
+    else if (mode === 'hold') r.classList.add('hold');
+  }
+
+  // Les commandes tactiles disparaissent dans les menus et les inventaires
+  updateTouchUi() {
+    if (!this.tb) return;
+    const g = this.game;
+    const show = !!this.touchMode && g.state === 'playing' && !this.screenOpen() && !(g.player && g.player.dead);
+    if (show !== this._touchShown) {
+      this._touchShown = show;
+      this.touchEl.style.display = show ? 'block' : 'none';
+      if (show) { this.updateRotation(); this.layoutTouch(); this.iosHint(); }
+    }
+    if (show && ++this._touchFrames % 60 === 0) {
+      // la barre d'action change de taille (échelle de l'interface, mode de jeu) : on vérifie de temps en temps
+      const hb = this.hotbar.parentElement;
+      const key = hb.offsetWidth + ':' + hb.offsetHeight + ':' + window.innerWidth + ':' + window.innerHeight;
+      if (key !== this._touchKey) { this._touchKey = key; this.updateRotation(); this.layoutTouch(); }
+    }
+  }
+
+  // iPhone : pas de plein écran dans Safari, seule l'application ajoutée à l'écran d'accueil cache la barre d'adresse
+  iosHint() {
+    if (this._iosHinted || this.canFullscreen() || navigator.standalone) return;
+    if (!/iPhone|iPad|iPod/.test(navigator.userAgent)) return;
+    this._iosHinted = true;
+    this.chat('Pour jouer en plein écran sans la barre d\'adresse : bouton Partager → « Sur l\'écran d\'accueil », puis lancez le jeu depuis l\'icône.', '#ffff55');
   }
 
   // ---------- état ----------
@@ -121,6 +323,7 @@ export class UI {
 
   setCursor(s) {
     this.cursor = s && s.count > 0 ? s : null;
+    if (this.cursor) this.showTooltip(null);
     renderSlot(this.cursorEl, this.cursor);
     this.cursorEl.style.display = this.cursor ? 'block' : 'none';
     if (this.mx !== undefined) { this.cursorEl.style.left = this.mx + 'px'; this.cursorEl.style.top = this.my + 'px'; }
@@ -138,7 +341,7 @@ export class UI {
   placeTooltip() {
     const t = this.tooltipEl;
     let x = (this.mx || 0) + 16, y = (this.my || 0) - 10;
-    if (x + t.offsetWidth > window.innerWidth) x = (this.mx || 0) - t.offsetWidth - 10;
+    if (x + t.offsetWidth > this.viewW()) x = (this.mx || 0) - t.offsetWidth - 10;
     t.style.left = x + 'px';
     t.style.top = Math.max(0, y) + 'px';
   }
@@ -151,16 +354,28 @@ export class UI {
     this.screenEl.appendChild(scr.root);
     this.screenEl.classList.add('open');
     this.game.input.releaseLock();
+    if (this.touchMode) {
+      // tactile : boutons fermer et déplacement rapide (l'équivalent de Maj+clic)
+      const bar = el('div', 'pbtns', scr.root);
+      const q = el('button', 'pbtn', bar, '⇄');
+      q.title = 'Déplacement rapide';
+      q.addEventListener('click', (e) => { e.stopPropagation(); scr.quickMode = !scr.quickMode; q.classList.toggle('on', scr.quickMode); });
+      const x = el('button', 'pbtn', bar, '✕');
+      x.title = 'Fermer';
+      x.addEventListener('click', (e) => { e.stopPropagation(); this.closeScreen(); });
+    }
     scr.render();
     // infobulles
     for (const sl of scr.slots) {
-      sl.el.addEventListener('mouseenter', () => this.showTooltip(sl.get()));
+      sl.el.addEventListener('mouseenter', () => this.showTooltip(this.cursor ? null : sl.get()));
       sl.el.addEventListener('mouseleave', () => this.showTooltip(null));
     }
     this.game.audio.ui('click');
   }
 
-  closeScreen(silent) {
+  // silent : ne pas recapturer la souris ; soft : la recapturer si le navigateur l'autorise,
+  // sinon le jeu continue et « Cliquez pour jouer » s'affiche (pas de menu pause)
+  closeScreen(silent, soft = false) {
     if (!this.screen) return;
     const s = this.screen;
     this.screen = null;
@@ -173,7 +388,7 @@ export class UI {
     this.showTooltip(null);
     this.screenEl.innerHTML = '';
     this.screenEl.classList.remove('open');
-    if (!silent && this.game.state === 'playing') this.game.input.requestLock();
+    if (!silent && this.game.state === 'playing') this.game.input.requestLock(soft);
   }
 
   openInventory(forceSurvival) {
@@ -203,8 +418,9 @@ export class UI {
       return false;
     }
     if (this.screen) {
-      // Échap ne peut pas recapturer la souris (règle des navigateurs) : on ouvre la pause
-      if (code === 'Escape') { e.preventDefault(); this.closeScreen(true); this.openPause(); return true; }
+      // Échap ferme la fenêtre comme dans Minecraft (si le navigateur refuse de recapturer la souris
+      // sur Échap, un clic dans le jeu suffit à la reprendre)
+      if (code === 'Escape') { e.preventDefault(); this.closeScreen(false, true); return true; }
       if (code === k.inventory) { this.closeScreen(); e.preventDefault(); return true; }
       for (let i = 1; i <= 9; i++) if (code === k['hotbar' + i]) { if (this.screen.numberKey) this.screen.numberKey(i - 1); return true; }
       if (code === k.drop && this.screen.dropHovered) { this.screen.dropHovered(e.ctrlKey); return true; }
@@ -241,17 +457,17 @@ export class UI {
     setTimeout(() => { this.chatInput.focus(); this.chatInput.setSelectionRange(prefix.length, prefix.length); }, 0);
   }
 
-  closeChat(silent = false) {
+  closeChat(silent = false, soft = false) {
     this.chatOpen = false;
     this.chatInput.style.display = 'none';
     this.chatEl.classList.remove('open');
     this.chatInput.blur();
-    if (!silent) this.game.input.requestLock();
+    if (!silent) this.game.input.requestLock(soft);
   }
 
   onChatKey(e) {
     e.stopPropagation();
-    if (e.code === 'Escape') { this.closeChat(true); if (this.game.state === 'playing') this.openPause(); return; }
+    if (e.code === 'Escape') { this.closeChat(false, true); return; }
     if (e.code === 'ArrowUp') { if (this.chatHistory.length) { this.chatHistIdx = Math.min(this.chatHistory.length - 1, this.chatHistIdx + 1); this.chatInput.value = this.chatHistory[this.chatHistory.length - 1 - this.chatHistIdx]; } e.preventDefault(); return; }
     if (e.code === 'ArrowDown') { this.chatHistIdx = Math.max(-1, this.chatHistIdx - 1); this.chatInput.value = this.chatHistIdx >= 0 ? this.chatHistory[this.chatHistory.length - 1 - this.chatHistIdx] : ''; e.preventDefault(); return; }
     if (e.code === 'Tab') {
@@ -401,7 +617,7 @@ export class UI {
     this.hurtOverlay.style.opacity = p.hurtTime > 0 ? (p.hurtTime / 10) * 0.35 : 0;
     this.sleepOverlay.style.opacity = p.sleeping ? Math.min(1, p.sleepTimer / 100) : p.dead ? 0 : 0;
     this.waterOverlay.style.opacity = g.renderer && g.renderer.env && g.renderer.env.underFluid ? 0.25 : 0;
-    this.clickHint.style.display = g.state === 'playing' && !this.screenOpen() && !g.input.locked && !g.input.dragLook && !g.input.touch.active && !p.dead ? 'block' : 'none';
+    this.clickHint.style.display = g.state === 'playing' && !this.screenOpen() && !g.input.locked && !g.input.dragLook && !this.touchMode && !p.dead ? 'block' : 'none';
     // debug
     this.debug.style.display = g.showDebug ? 'block' : 'none';
     if (g.showDebug) this.updateDebug();
@@ -473,11 +689,11 @@ export class UI {
     return panel;
   }
 
-  closeMenu(resume = true) {
+  closeMenu(resume = true, soft = false) {
     this.menu = null;
     this.screenEl.innerHTML = '';
     this.screenEl.classList.remove('open', 'dirt');
-    if (resume && this.game.state === 'playing') this.game.input.requestLock();
+    if (resume && this.game.state === 'playing') this.game.input.requestLock(soft);
   }
 
   button(parent, text, fn, cls = '') {
@@ -592,13 +808,14 @@ export class UI {
       this.button(col, 'Sauvegarder et quitter', () => { g.paused = false; g.quitToTitle(); });
       const p2 = g.player;
       el('div', 'stats', p, 'Morts : ' + p2.stats.deaths + ' — Créatures tuées : ' + p2.stats.kills + ' — Blocs minés : ' + p2.stats.blocksMined + ' — Temps de jeu : ' + Math.floor(p2.stats.playTicks / 1200) + ' min');
-    }, { back: () => this.resume(), cls: 'pause' });
+    }, { back: () => this.resume(true), cls: 'pause' });
     this.menu.isPause = true;
   }
 
-  resume() {
+  // soft : reprise par Échap (le navigateur peut refuser de recapturer la souris sur cette touche)
+  resume(soft = false) {
     this.game.paused = false;
-    this.closeMenu(true);
+    this.closeMenu(true, soft);
   }
 
   // ----- mort -----
@@ -761,7 +978,7 @@ export class UI {
   openAdvancements(back) {
     const g = this.game;
     const done = g.meta ? g.meta.advancements || {} : {};
-    const doBack = back || (() => this.closeMenu(true));
+    const doBack = back || (() => this.closeMenu(true, true));
     this.showMenu((p) => {
       el('h2', '', p, 'Progrès — ' + Object.keys(done).length + ' / ' + ADVANCEMENTS.length);
       const list = el('div', 'advlist', p);
@@ -798,7 +1015,7 @@ export class UI {
         [kn('sprint') + ' / double ' + kn('forward'), 'Sprinter'], [kn('attack'), 'Miner / attaquer'], [kn('use'), 'Poser / utiliser / manger / tirer à l\'arc'], [kn('pickBlock'), 'Choisir le bloc visé'],
         ['1-9 / molette', 'Barre d\'action'], [kn('inventory'), 'Inventaire'], [kn('drop'), 'Jeter un objet (Ctrl : toute la pile)'], [kn('chat') + ' ou ' + kn('command'), 'Chat et commandes (/help)'], [kn('advancements'), 'Progrès'],
         [kn('zoom'), 'Zoom'], [kn('hideHud'), 'Masquer l\'interface'], [kn('screenshot'), 'Capture d\'écran'], [kn('debug'), 'Informations de débogage'], [kn('perspective'), 'Changer de vue'], ['Échap', 'Pause'],
-        ['Inventaire', 'Maj+clic : déplacement rapide ; clic droit : moitié / un par un ; glisser : répartir ; double-clic : rassembler ; livre de recettes à droite'],
+        ['Inventaire', 'Maj+clic : déplacement rapide ; clic droit : moitié / un par un ; clic droit maintenu en glissant : un objet par case ; clic gauche maintenu en glissant : répartir ; double-clic : rassembler ; Échap ou ' + kn('inventory') + ' : fermer'],
       ];
       el('div', 'tip', box, 'Toutes les touches se changent dans Options → Commandes.');
       const tbl = el('div', 'keys', box);
@@ -845,7 +1062,7 @@ export class UI {
       el('div', 'ctitle', inner, 'Merci d\'avoir joué !');
       const skip = el('div', 'cskip', p, 'Cliquez ou appuyez sur Échap pour passer');
       void skip;
-      let y = window.innerHeight;
+      let y = this.viewH();
       let last = performance.now();
       let speed = 40;
       const finish = () => {

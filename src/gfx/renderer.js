@@ -827,19 +827,25 @@ export class Renderer {
         const snow = biome === 5 || biome === 12 || biome === 9 || (biome === 7 && top > 95);
         if (biome === 6) continue;
         const layer = snow ? snowL : rainL;
-        const speed = snow ? 1.5 : 12;
-        const off = ((t * speed + (h & 255) / 25) % 4);
+        // vitesse de chute en motifs (1 motif = 4 blocs) par seconde : pluie ≈ 11-14 blocs/s, neige ≈ 1,5 bloc/s ;
+        // le décalage diminue pour que le motif descende
+        const phase = (h & 255) / 256;
+        const speed = snow ? 0.32 + ((h >> 8) & 7) * 0.02 : 2.7 + ((h >> 8) & 7) * 0.1;
+        const fall = t * speed + phase;
+        const off = 1 - (fall - Math.floor(fall));
+        // UV au 1/32 de pixel (u_uvScale = 1/32) pour une animation fluide
+        const su = snow ? Math.round(16 + Math.sin(t * 0.9 + phase * 6.28) * 6) : 16;
         const sky = world.getSky(x, Math.floor(y0), z) * 17;
         // quad vertical orienté vers la caméra
         const len = Math.hypot(dx, dz) || 1;
         const px = -dz / len * 0.5, pz = dx / len * 0.5;
         const ox = x + 0.5 - cam.x, oz = z + 0.5 - cam.z;
         const vy0 = (y0 - cam.y), vy1 = (y1 - cam.y);
-        const v0 = (vy1 - vy0) * 4 + off * 16, v1 = off * 16;
-        buf.v(Math.round((ox - px) * 256), Math.round(vy0 * 256), Math.round((oz - pz) * 256), 0, Math.min(255, v0 % 256), layer, sky, 0, 255, 255, 255, 255, 0);
-        buf.v(Math.round((ox + px) * 256), Math.round(vy0 * 256), Math.round((oz + pz) * 256), 16, Math.min(255, v0 % 256), layer, sky, 0, 255, 255, 255, 255, 0);
-        buf.v(Math.round((ox + px) * 256), Math.round(vy1 * 256), Math.round((oz + pz) * 256), 16, v1 % 256, layer, sky, 0, 255, 255, 255, 255, 0);
-        buf.v(Math.round((ox - px) * 256), Math.round(vy1 * 256), Math.round((oz - pz) * 256), 0, v1 % 256, layer, sky, 0, 255, 255, 255, 255, 0);
+        const v1 = Math.round(off * 32), v0 = Math.min(255, v1 + Math.round((vy1 - vy0) * 8));
+        buf.v(Math.round((ox - px) * 256), Math.round(vy0 * 256), Math.round((oz - pz) * 256), su, v0, layer, sky, 0, 255, 255, 255, 255, 0);
+        buf.v(Math.round((ox + px) * 256), Math.round(vy0 * 256), Math.round((oz + pz) * 256), su + 32, v0, layer, sky, 0, 255, 255, 255, 255, 0);
+        buf.v(Math.round((ox + px) * 256), Math.round(vy1 * 256), Math.round((oz + pz) * 256), su + 32, v1, layer, sky, 0, 255, 255, 255, 255, 0);
+        buf.v(Math.round((ox - px) * 256), Math.round(vy1 * 256), Math.round((oz - pz) * 256), su, v1, layer, sky, 0, 255, 255, 255, 255, 0);
       }
     if (!buf.n) return;
     this.flushDyn();
@@ -847,7 +853,7 @@ export class Renderer {
     gl.useProgram(W.program);
     gl.uniform3f(W.u.u_offset, 0, 0, 0);
     gl.uniform1f(W.u.u_posScale, 1 / 256);
-    gl.uniform1f(W.u.u_uvScale, 1 / 16);
+    gl.uniform1f(W.u.u_uvScale, 1 / 32);
     gl.uniform1f(W.u.u_alphaTest, 0.05);
     gl.uniform1f(W.u.u_alphaMul, Math.min(1, w.strength) * 0.8);
     gl.depthMask(false);

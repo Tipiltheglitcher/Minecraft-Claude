@@ -12,7 +12,7 @@ export class Input {
     this.locked = false;
     this.dragLook = false;
     this.lastTap = {};
-    this.touch = { active: false, moveId: null, lookId: null, mx: 0, my: 0, sx: 0, sy: 0, lx: 0, ly: 0 };
+    this.touch = { active: false, moveId: null, lookId: null, mx: 0, my: 0, sx: 0, sy: 0, lx: 0, ly: 0, sprint: false, holding: null, lastTouch: 0 };
     this.bind();
   }
 
@@ -47,6 +47,8 @@ export class Input {
   releaseAll() {
     this.keys.clear();
     this.mouse.left = this.mouse.right = this.mouse.middle = false;
+    const t = this.touch;
+    t.moveId = t.lookId = null; t.mx = t.my = 0; t.sprint = false; t.holding = null;
   }
 
   bind() {
@@ -58,8 +60,9 @@ export class Input {
       this.game.audio.init();
       if (this.game.ui.screenOpen()) return;
       if (!this.locked) {
-        this.requestLock();
-        if (!document.pointerLockElement && this.game.state === 'playing') this.dragLook = true;
+        this.requestLock(true);
+        // ce clic sert seulement à recapturer la souris (il ne mine pas et n'attaque pas),
+        // sauf si le verrouillage est indisponible (page intégrée) : on regarde en glissant
         if (!this.dragLook) return;
       }
       if (e.button === 1) e.preventDefault();
@@ -69,6 +72,8 @@ export class Input {
       if (this.keys.has('Mouse' + e.button) || e.button <= 2) this.press('Mouse' + e.button, false);
     });
     window.addEventListener('mousemove', (e) => {
+      // vraie souris (pas un événement simulé après un appui tactile) : on quitte le mode tactile
+      if ((e.movementX || e.movementY) && performance.now() - this.touch.lastTouch > 1500) this.game.ui.setTouchMode(false);
       if (this.locked || (this.dragLook && (e.buttons & 1 || e.buttons & 2) && !this.game.ui.screenOpen())) {
         this.mouse.dx += e.movementX || 0;
         this.mouse.dy += e.movementY || 0;
@@ -94,8 +99,10 @@ export class Input {
     c.addEventListener('touchcancel', (e) => this.onTouch(e, 'end'), { passive: false });
   }
 
-  requestLock() {
+  // soft : en cas de refus, on reste en jeu avec « Cliquez pour jouer » au lieu d'ouvrir la pause
+  requestLock(soft = false) {
     if (this.game.state !== 'playing') return;
+    this.softUntil = soft ? performance.now() + 1500 : 0;
     try {
       const p = this.canvas.requestPointerLock();
       if (p && p.catch) p.catch(() => this.lockError());
@@ -108,6 +115,7 @@ export class Input {
   // sinon le verrouillage est indisponible (page intégrée) → regard en glissant
   lockError() {
     if (this.locked) return;
+    if (this.lockWorked && performance.now() < (this.softUntil || 0)) return;
     if (this.lockWorked) this.game.ui.lockFailed();
     else this.dragLook = true;
   }
@@ -152,35 +160,88 @@ export class Input {
     this.mouse.wheel = 0;
   }
 
-  // ---------- tactile : moitié gauche = déplacement, moitié droite = regard ----------
+  // ---------- tactile (comme Minecraft Bedrock) ----------
+  // moitié gauche : joystick qui apparaît sous le pouce (poussé à fond vers l'avant = sprint) ;
+  // moitié droite : glisser pour regarder, appui bref = frapper / poser / utiliser,
+  // doigt immobile 0,35 s = miner (ou manger, boire, bander l'arc) tant qu'il reste posé
   onTouch(e, kind) {
-    if (this.game.state !== 'playing' || this.game.ui.screenOpen()) return;
+    const t = this.touch;
+    t.lastTouch = performance.now();
+    const ui = this.game.ui;
+    ui.setTouchMode(true);
+    const playing = this.game.state === 'playing' && !ui.screenOpen();
+    if (!playing && kind === 'start') return;
     e.preventDefault();
     this.game.audio.init();
-    const t = this.touch;
     t.active = true;
-    const w = this.canvas.clientWidth;
+    const w = ui.viewW();
+    const now = performance.now();
+    const R = ui.joyRadius || 50;
     for (const tt of e.changedTouches) {
+      // coordonnées dans le repère du jeu (l'affichage peut être tourné en paysage)
+      const [x, y] = ui.toGame(tt.clientX, tt.clientY);
       if (kind === 'start') {
-        if (tt.clientX < w / 2 && t.moveId === null) { t.moveId = tt.identifier; t.sx = tt.clientX; t.sy = tt.clientY; t.mx = 0; t.my = 0; }
-        else if (t.lookId === null) { t.lookId = tt.identifier; t.lx = tt.clientX; t.ly = tt.clientY; t.lookStart = performance.now(); t.lookMoved = 0; }
+        if (x < w / 2 && t.moveId === null) {
+          t.moveId = tt.identifier; t.sx = x; t.sy = y; t.mx = 0; t.my = 0; t.sprint = false;
+          ui.joystick(x, y, 0, 0);
+        } else if (t.lookId === null) {
+          t.lookId = tt.identifier; t.lx = x; t.ly = y; t.ax = x; t.ay = y;
+          t.lookStart = now; t.stillSince = now; t.dragged = false; t.holding = null;
+          ui.touchRing(x, y, 'show');
+        }
       } else if (kind === 'move') {
-        if (tt.identifier === t.moveId) { t.mx = (tt.clientX - t.sx) / 50; t.my = (tt.clientY - t.sy) / 50; }
+        if (tt.identifier === t.moveId) {
+          let dx = (x - t.sx) / R, dy = (y - t.sy) / R;
+          const l = Math.hypot(dx, dy);
+          // la base suit le pouce s'il dépasse le cercle
+          if (l > 1) { t.sx = x - (dx / l) * R; t.sy = y - (dy / l) * R; dx /= l; dy /= l; }
+          t.mx = Math.abs(dx) < 0.12 ? 0 : dx;
+          t.my = Math.abs(dy) < 0.12 ? 0 : dy;
+          t.sprint = l >= 0.98 && dy < -0.85;
+          ui.joystick(t.sx, t.sy, dx, dy, t.sprint);
+        }
         if (tt.identifier === t.lookId) {
-          const dx = tt.clientX - t.lx, dy = tt.clientY - t.ly;
-          this.mouse.dx += dx * 2; this.mouse.dy += dy * 2;
-          t.lookMoved += Math.abs(dx) + Math.abs(dy);
-          t.lx = tt.clientX; t.ly = tt.clientY;
-          if (performance.now() - t.lookStart > 400 && t.lookMoved < 10) this.mouse.left = true;
+          const dx = x - t.lx, dy = y - t.ly;
+          this.mouse.dx += dx * 2.2; this.mouse.dy += dy * 2.2;
+          t.lx = x; t.ly = y;
+          if (Math.hypot(x - t.ax, y - t.ay) > 10) {
+            t.ax = x; t.ay = y; t.stillSince = now; t.dragged = true;
+            if (!t.holding) ui.touchRing(x, y, 'show');
+          }
+          ui.touchRing(x, y);
         }
       } else {
-        if (tt.identifier === t.moveId) { t.moveId = null; t.mx = t.my = 0; }
+        if (tt.identifier === t.moveId) { t.moveId = null; t.mx = t.my = 0; t.sprint = false; ui.joystick(null); }
         if (tt.identifier === t.lookId) {
-          if (performance.now() - t.lookStart < 250 && t.lookMoved < 10) this.clicked.right = true;
-          this.mouse.left = false;
+          if (t.holding === 'use') this.mouse.right = false;
+          else if (t.holding) this.mouse.left = false;
+          else if (playing && !t.dragged && now - t.lookStart < 350) {
+            if (this.game.interaction.touchAction(false) === 'attack') this.clicked.left = true;
+            else this.clicked.right = true;
+          }
+          t.holding = null;
           t.lookId = null;
+          ui.touchRing(0, 0, 'hide');
         }
       }
     }
+  }
+
+  // Appelé à chaque image : appui long et attaques répétées sur une créature
+  updateTouch() {
+    const t = this.touch;
+    const g = this.game;
+    g.ui.updateTouchUi();
+    if (t.lookId === null || g.state !== 'playing' || g.ui.screenOpen()) return;
+    const now = performance.now();
+    if (!t.holding && now - t.stillSince > 350) {
+      t.holding = g.interaction.touchAction(true);
+      if (t.holding === 'use') { this.mouse.right = true; this.clicked.right = true; }
+      else { this.mouse.left = true; this.clicked.left = true; t.lastHit = now; }
+      g.ui.touchRing(t.lx, t.ly, 'hold');
+      try { navigator.vibrate && navigator.vibrate(12); } catch (e) { /* facultatif */ }
+    }
+    // doigt maintenu sur une créature : un coup toutes les 0,5 s
+    if (t.holding === 'break' && g.targetEntity && now - t.lastHit > 500) { this.clicked.left = true; t.lastHit = now; }
   }
 }

@@ -90,17 +90,23 @@ export class Mob extends Living {
     const yaw = Math.atan2(-dx, -dz);
     this.yaw += M.clamp(M.wrapAngle(yaw - this.yaw), -0.5, 0.5);
     this.headYaw = this.yaw;
-    this.forward = 1;
-    this.moveSpeed = this.baseSpeed * speedMul;
+    this.setMove(1, 0, speedMul);
     if ((n.y > this.y + 0.5 || this.collidedH) && this.onGround) this.jumping = true;
+  }
+
+  // Comme Minecraft : l'entrée de déplacement d'une créature vaut sa vitesse (et pas 1),
+  // l'accélération au sol est donc vitesse² (zombie ≈ 2,3 blocs/s au lieu de 10)
+  setMove(forward, strafe, speedMul = 1) {
+    this.moveSpeed = this.baseSpeed * speedMul;
+    this.forward = forward * this.moveSpeed;
+    this.strafe = strafe * this.moveSpeed;
   }
 
   moveDirect(x, z, speedMul = 1) {
     const dx = x - this.x, dz = z - this.z;
     const yaw = Math.atan2(-dx, -dz);
     this.yaw += M.clamp(M.wrapAngle(yaw - this.yaw), -0.5, 0.5);
-    this.forward = 1;
-    this.moveSpeed = this.baseSpeed * speedMul;
+    this.setMove(1, 0, speedMul);
     if (this.collidedH && this.onGround) this.jumping = true;
   }
 
@@ -301,7 +307,7 @@ class Animal extends Mob {
     if (this.panicTime > 0) {
       this.panicTime--;
       if (!this.panicGoal || this.age % 30 === 0) this.panicGoal = [this.x + (rnd() - 0.5) * 16, this.y, this.z + (rnd() - 0.5) * 16];
-      this.moveDirect(this.panicGoal[0], this.panicGoal[2], 1.6);
+      this.moveDirect(this.panicGoal[0], this.panicGoal[2], 1.25);
       return;
     }
     // suivre le joueur qui tient de la nourriture
@@ -467,9 +473,8 @@ export class Skeleton extends Monster {
     const see = this.canSee(t);
     if (d > 12 || !see) this.navigateTo(t.x, t.y, t.z, 1);
     else {
-      if (d < 6) { this.forward = -0.5; }
       if (--this.strafeTimer <= 0) { this.strafeTimer = rint(20, 60); if (rnd() < 0.3) this.strafeDir *= -1; }
-      this.strafe = this.strafeDir * 0.5;
+      this.setMove(d < 6 ? -0.5 : 0, this.strafeDir * 0.5);
       this.yaw = this.headYaw;
     }
     if (see && d < 16) {
@@ -642,7 +647,7 @@ export class Enderman extends Monster {
     }
     if (this.target && this.angry) {
       const t = this.target;
-      this.chase(t, 1.3);
+      this.chase(t, 1);
       if (this.distanceTo(t) > 12 && this.tpCooldown <= 0 && rnd() < 0.05) this.teleportToward(t);
     } else {
       this.wander(0.6);

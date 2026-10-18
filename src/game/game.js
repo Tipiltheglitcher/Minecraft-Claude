@@ -373,6 +373,7 @@ export class Game {
     this._frames++;
     if (t - this._fpsT >= 1000) { this.fps = this._frames; this._frames = 0; this._fpsT = t; }
     try {
+      this.input.updateTouch();
       if (this.state === 'loading') {
         this.loadingStep();
       } else if (this.state === 'playing' || this.state === 'credits') {
@@ -437,7 +438,7 @@ export class Game {
       if (fwd <= 0) { this.sprintToggle = false; }
       if (inp.doubleHit('jump') && p.creative) { p.flying = !p.flying; if (p.gamemode === 'spectator') p.flying = true; }
       const sneak = s.toggleSneak ? this.sneakLatch : h('sneak');
-      const sprint = (s.toggleSprint ? this.sprintLatch : h('sprint')) || this.sprintToggle;
+      const sprint = (s.toggleSprint ? this.sprintLatch : h('sprint')) || this.sprintToggle || (inp.touch.sprint && fwd > 0);
       p.input = { forward: fwd, strafe: str, jump: h('jump'), sneak, sprint };
       if (inp.hit('drop') && !p.dead) this.interaction.dropSelected(h('sprint') || inp.down('ControlLeft') || inp.down('ControlRight'));
     } else p.input = { forward: 0, strafe: 0, jump: false, sneak: false, sprint: false };
